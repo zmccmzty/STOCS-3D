@@ -1,0 +1,6 @@
+results
+__pycache__/
+cfg/__pycache__/
+data/__pycache__/
+semiinfinite/__pycache__/
+*.pyc
