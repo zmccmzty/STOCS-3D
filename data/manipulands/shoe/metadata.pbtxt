@@ -1,0 +1,39 @@
+model {
+  file: "model.sdf"
+}
+name: "adizero_F50_TRX_FG_LEA"
+description: "adizero F50 TRX FG LEA"
+version: 1
+authors {
+  name: "Google"
+  email: "scanned-objects@google.com"
+}
+legal {
+  copyright: "Copyright 2020 Google LLC."
+  license: "Creative Commons Attribution 4.0 International"
+}
+annotations {
+  key: "brand"
+  value: "Adidas"
+}
+annotations {
+  key: "gtin"
+  value: "886837724285"
+}
+annotations {
+  key: "mpn"
+  value: "g96922"
+}
+annotations {
+  key: "sku"
+  value: "G96922"
+}
+compatibilities {
+  name: "Gazebo"
+  version {
+    major: 11
+  }
+}
+categories {
+  first: "Shoe"
+}
