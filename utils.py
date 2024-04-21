@@ -1,12 +1,16 @@
 import numpy as np
-from typing import List,Tuple,Optional
-from klampt import Geometry3D,VolumeGrid
+from typing import List,Tuple,Optional,Union
+from klampt import Geometry3D,VolumeGrid,DistanceQuerySettings,DistanceQueryResult
+from klampt.math import se3
+from semiinfinite.geometryopt import PenetrationDepthGeometry
 
 class SDFCache:
     """Allows evaluating gradient with Drake's autodiff"""
     def __init__(self,geom:Geometry3D):
         assert geom.type() == 'VolumeGrid'
         self.geom = geom
+        T0 = geom.getCurrentTransform()
+        geom.setCurrentTransform(*se3.identity())
         self.distances = geom.getVolumeGrid()
         self.gradient_x_field = np.empty(self.distances.dims)
         self.gradient_y_field = np.empty(self.distances.dims)
@@ -16,14 +20,16 @@ class SDFCache:
         xgrid = np.linspace(bmin[0],bmax[0],self.distances.dims[0])
         ygrid = np.linspace(bmin[1],bmax[1],self.distances.dims[1])
         zgrid = np.linspace(bmin[2],bmax[2],self.distances.dims[2])
+        settings = DistanceQuerySettings()
         for i in range(self.distances.dims[0]):
             for j in range(self.distances.dims[1]):
                 for k in range(self.distances.dims[2]):
-                    d = self.geom.distance_point_ext((xgrid[i],ygrid[j],zgrid[k])) 
+                    d = self.geom.distance_point_ext((xgrid[i],ygrid[j],zgrid[k]),settings) 
                     grad = d.grad1
                     self.gradient_x_field[i,j,k] = grad[0]
                     self.gradient_y_field[i,j,k] = grad[1]
                     self.gradient_z_field[i,j,k] = grad[2]
+        geom.setCurrentTransform(*T0)
     
     def distance(self,pt:Tuple[float,float,float]) -> float:
         return trilinear_interpolation(self.distances.bbox,self.distances.getValues(),pt)
@@ -34,7 +40,7 @@ class SDFCache:
         dz = trilinear_interpolation(self.distances.bbox,self.gradient_z_field,pt)
         return dx,dy,dz
 
-def compute_unified_sdf(geometry_list : List[Geometry3D], resolution : Optional[float]=None) -> Geometry3D:
+def compute_unified_sdf(geometry_list : List[Union[Geometry3D,PenetrationDepthGeometry]], resolution : Optional[float]=None) -> Geometry3D:
     """Compute a single SDF from a list of geometries.  Result is a klampt
     Geometry3D object with the VolumeGrid datatype.
 
@@ -44,11 +50,29 @@ def compute_unified_sdf(geometry_list : List[Geometry3D], resolution : Optional[
     The domain of the SDF is determined automatically from the bounding boxes of the
     input geometries.
     """
+    if len(geometry_list) == 0:
+        raise ValueError("No geometries provided")
+    if resolution is None:
+        resolution = 0 #flag in Klampt to auto-detect resolution
+    g3d_list = []
+    for i,g in enumerate(geometry_list):
+        if not isinstance(g,(Geometry3D,PenetrationDepthGeometry)):
+            raise ValueError(f"Element {i} of geometry_list is not a Geometry3D or PenetrationDepthGeometry")
+        if isinstance(g,PenetrationDepthGeometry):
+            if g.grid is None:
+                raise ValueError(f"PenetrationDepthGeometry must have a grid")
+            g3d_list.append(g.grid)
+        else:
+            g3d_list.append(g)
+    if len(g3d_list) == 1:
+        if g3d_list[0].type() == 'VolumeGrid':
+            return g3d_list[0]   #ignore resolution here
+        return g3d_list[0].convert('VolumeGrid',resolution)
     group = Geometry3D()
     group.setGroup()
-    for i,g in enumerate(geometry_list):
+    for i,g in enumerate(g3d_list):
         group.setElement(i,g)
-    res = group.convert('VolumeGrid',resolution if resolution is not None else 0)
+    res = group.convert('VolumeGrid',resolution)
     return res
 
     h1, h2, h3 = (x2 - x1) / n1, (y2 - y1) / n2, (z2 - z1) / n3 # grid spacing
@@ -94,9 +118,9 @@ def trilinear_interpolation(bounds, values, pt, is_distance=True):
     x_bb = (pt[0] - bmin[0]) / (bmax[0] - bmin[0]) * (values.shape[0] - 1)
     y_bb = (pt[1] - bmin[1]) / (bmax[1] - bmin[1]) * (values.shape[1] - 1)
     z_bb = (pt[2] - bmin[2]) / (bmax[2] - bmin[2]) * (values.shape[2] - 1)
-    x_idx = np.floor(x_bb).astype(int)
-    y_idx = np.floor(y_bb).astype(int)
-    z_idx = np.floor(z_bb).astype(int)
+    x_idx = int(np.floor(x_bb))
+    y_idx = int(np.floor(y_bb))
+    z_idx = int(np.floor(z_bb))
 
     # Check if the point is within the grid
     extra_dist = 0.0
