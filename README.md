@@ -15,7 +15,8 @@ This library implements the
 ```
 ## Installing dependencies
 
-Install python dependencies as follows
+STOCS requires Python packages for Drake, Klampt, trimesh, and a few small utility libraries.  Install these dependencies as follows:
+
 > python -m pip install -r requirements.txt
 
 (To install system-wide, use sudo)
