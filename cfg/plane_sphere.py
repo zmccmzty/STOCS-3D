@@ -59,8 +59,8 @@ problem = Problem(manipuland = manipuland,
                   )
 
 # Optimizer parameters
-oracle = SmoothingOracleParams(add_threshold=0.1,
-                               remove_threshold=0.5,
+oracle = SmoothingOracleParams(add_threshold=0.05,
+                               remove_threshold=0.1,
                                translation_disturbances=[1e-2],
                                rotation_disturbances=[1e-2],
                                time_smoothing_step=1)
