@@ -62,11 +62,10 @@ problem = Problem(manipuland = manipuland,
                     w_max = np.pi,  #angular velocity bound
                     mu_env=1.0,  #friction
                     mu_mnp=1.0,  #friction
-                    manipuland_name="cube",
-                    environment_name="plane",
                     initial_pose_relaxation= 1e-3,  #tolerance parameters -- lets the initial and goal pose wiggle a bit to attain feasibility
                     goal_pose_relaxation = 1e-3
                   )
+
 # Optimizer parameters
 oracle = SmoothingOracleParams(add_threshold=0.1,
                                remove_threshold=0.5,

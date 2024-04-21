@@ -1,15 +1,7 @@
 from klampt.math import so3
 import numpy as np
-from STOCS import Problem, OptimizerParams, SmoothingOracleParams
-
-# import from semiinfinite, which is a package in the parent directory
-import sys
-import os
-
-# Add the parent directory to sys.path
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, parent_dir)
-from semiinfinite.geometryopt import PenetrationDepthGeometry,Geometry3D
+import trimesh
+from STOCS import Problem, OptimizerParams, SmoothingOracleParams, PenetrationDepthGeometry, Geometry3D
 
 manipuland_fn = "data/manipulands/sphere/sphere.off"
 terrain_fn = "data/environments/fractal/fractal.stl"
@@ -24,8 +16,6 @@ manipuland_g3d = Geometry3D()
 manipuland_g3d.loadFile(manipuland_fn)
 manipuland_g3d.transform([scale_x, 0, 0, 0, scale_y, 0, 0, 0, scale_z], [0.0, 0.0, 0.0])
 manipuland = PenetrationDepthGeometry(manipuland_g3d, gridres, pcres)
-
-# Manipuland inertia
 mass = 0.1
 com = [0,0,0]
 I = np.diag([1.66666667e-04]*3)
@@ -70,8 +60,6 @@ problem = Problem(manipuland = manipuland,
                     w_max = np.pi,  #angular velocity bound
                     mu_env=1.0,  #friction
                     mu_mnp=1.0,  #friction
-                    manipuland_name="sphere",
-                    environment_name="fractal",
                     initial_pose_relaxation= 0.1, #tolerance parameters -- lets the initial and goal pose wiggle a bit to attain feasibility
                     goal_pose_relaxation = 0.1
                   )

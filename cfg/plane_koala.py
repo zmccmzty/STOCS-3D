@@ -10,23 +10,15 @@ terrain_fn = "data/environments/plane/cube.off"
 gridres = 0.005
 pcres = 0.005
 
-# Geometry in Trimesh
-scale_x = 1.0
-scale_y = 1.0
-scale_z = 1.0
+# Set up manipuland
 # Used to calculate the center of mass of the manipuland
 manipuland_mesh = trimesh.load_mesh(manipuland_fn)
-matrix = np.array(
-    [[scale_x, 0, 0, 0], [0, scale_y, 0, 0], [0, 0, scale_z, 0], [0, 0, 0, 0]]
-)
-scaled_mesh = manipuland_mesh.apply_transform(matrix)
 mass = 0.1
 com = list(manipuland_mesh.center_mass)
 I = manipuland_mesh.moment_inertia*mass
 
 manipuland_g3d = Geometry3D()
 manipuland_g3d.loadFile(manipuland_fn)
-manipuland_g3d.transform([scale_x, 0, 0, 0, scale_y, 0, 0, 0, scale_z], [0.0, 0.0, 0.0])
 manipuland = PenetrationDepthGeometry(manipuland_g3d, gridres, pcres)
 
 # Set up environments
@@ -38,15 +30,14 @@ environments = [PenetrationDepthGeometry(terrain, gridres, pcres)]
 # Task parameters
 q_init = [1.0, 0.0, 0.0, 0.0]
 x_init = [0.5, 0.4, 0.0]
+T_init = (so3.from_quaternion(q_init), x_init)
 
-# Pivoting
 q_goal = [0.56253129, -0.82665503, 0.01, 0.01]
 x_goal = [0.5, 0.5, 0.09544157]
-T_init = (so3.from_quaternion(q_init), x_init)
+T_goal = (so3.from_quaternion(q_goal), x_goal)
 
 x_bound = [[0, 0, 0], [1, 1, 1]]
 v_bound = [[-1, -1, -1], [1, 1, 1]]
-T_goal = (so3.from_quaternion(q_goal), x_goal)
 
 manipulation_contact_points = [
     [0.006962, -0.004155, 0.186040],
@@ -61,8 +52,8 @@ manipulation_contact_normals = [
 
 #problem
 problem = Problem(manipuland = manipuland,
-                    manipuland_mass = 0.1,
-                    manipuland_com=[0,0,0],
+                    manipuland_mass = mass,
+                    manipuland_com=com,
                     manipuland_inertia = I,
                     environments = environments,
                     T_init = T_init,
@@ -76,8 +67,6 @@ problem = Problem(manipuland = manipuland,
                     w_max = np.pi,  #angular velocity bound
                     mu_env=1.0,  #friction
                     mu_mnp=1.0,  #friction
-                    manipuland_name="drug",
-                    environment_name="plane",
                     initial_pose_relaxation= 1e-2,  #tolerance parameters -- lets the initial and goal pose wiggle a bit to attain feasibility
                     goal_pose_relaxation = 1e-2
                   )
