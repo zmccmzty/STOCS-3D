@@ -1,9 +1,9 @@
 from STOCS import TimestepState,TrajectoryState,Problem
 from klampt.math import so3,se3,vectorops
-import open3d as o3d
 import numpy as np
 
 def plot_index_points_o3d(manipuland_o3d, state : TimestepState):
+    import open3d as o3d
     xyz = np.zeros((len(state.index_set),3))
     for i,index_pt in enumerate(state.index_set):
         xyz[i,:] = index_pt
