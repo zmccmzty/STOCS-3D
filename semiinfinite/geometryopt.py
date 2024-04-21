@@ -7,7 +7,6 @@ from klampt.model.typing import RigidTransform,Vector3,Config
 from .sip import *
 import numpy as np
 import scipy
-from icecream import ic
 
 try:
     import pyccd
