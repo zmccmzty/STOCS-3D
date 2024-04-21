@@ -29,11 +29,17 @@ def plot_problem_klampt(problem : Problem, show=True):
     cone_geom.loadFile("data/plot/cone.stl")
     manipulator_size = 1
     vis.add("x_bounds",problem.x_bound)
-    def draw_bounds(bb):
+    def draw_bounds(bb,color=(1,1,1)):
         from OpenGL.GL import glColor3f
-        glColor3f(1,0,0)
+        glColor3f(*color)
         gldraw.box(bb[0],bb[1],lighting=False,filled=False)
-    vis.setDrawFunc("x_bounds",draw_bounds)
+    vis.setDrawFunc("x_bounds",lambda data:draw_bounds(data,(1,1,1)))
+
+    vis.add("init_bounds",[vectorops.add(problem.T_init[1],[-problem.initial_pose_relaxation]*3),vectorops.add(problem.T_init[1],[problem.initial_pose_relaxation]*3)])
+    vis.setDrawFunc("init_bounds",lambda data:draw_bounds(data,(0,1,0)))
+
+    vis.add("goal_bounds",[vectorops.add(problem.T_goal[1],[-problem.goal_pose_relaxation]*3),vectorops.add(problem.T_goal[1],[problem.goal_pose_relaxation]*3)])
+    vis.setDrawFunc("goal_bounds",lambda data:draw_bounds(data,(1,0,0)))
 
     for i,e in enumerate(problem.environments):
         world.makeTerrain("terrain_"+str(i))
@@ -44,13 +50,13 @@ def plot_problem_klampt(problem : Problem, show=True):
     vis.add("goal_pose",problem.T_goal)
     obj_0 = world.makeRigidObject("manipuland_init")
     obj_0.geometry().set(problem.manipuland.geom)
-    obj_0.setTransform(problem.T_init)
+    obj_0.setTransform(*problem.T_init)
     obj_0.appearance().setColor(0,1,0,0.5)
     obj_0.appearance().setSilhouette(0.001)
 
     obj_1 = world.makeRigidObject("manipuland_goal")
     obj_1.geometry().set(problem.manipuland.geom)
-    obj_1.setTransform(problem.T_goal)
+    obj_1.setTransform(*problem.T_goal)
     obj_1.appearance().setColor(1,0,0,0.5)
     obj_1.appearance().setSilhouette(0.001)
 
@@ -69,7 +75,7 @@ def plot_problem_klampt(problem : Problem, show=True):
     problem.manipuland.setTransform((so3.identity(),[0,0,0]))
 
     normal_direction = problem.manipuland.normal(point_local)
-    normal_direction = so3.apply(problem.T_init,normal_direction)
+    normal_direction = so3.apply(problem.T_init[0],normal_direction)
 
     manipulator_0.setTransform(so3.canonical(normal_direction),point_world)
     manipulator_0.appearance().setColor(1,0,0,1.0)
@@ -115,7 +121,7 @@ def plot_trajectory_klampt(traj : TrajectoryState, problem : Problem, show=True)
         problem.manipuland.setTransform((so3.identity(),[0,0,0]))
 
         normal_direction = problem.manipuland.normal(point_local)
-        normal_direction = so3.apply(Ti,normal_direction)
+        normal_direction = so3.apply(Ti[0],normal_direction)
 
         #manipulator_i.setTransform(so3.canonical(normal_direction),point_world)
         manipulator_i.appearance().setColor(1,0,0,1.0)
