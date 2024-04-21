@@ -5,7 +5,6 @@ from klampt.model.trajectory import Trajectory,RobotTrajectory
 from .sip import *
 import numpy as np
 import scipy
-from icecream import ic
 
 try:
     import pyccd
@@ -23,16 +22,16 @@ def grid_to_numpy(grid):
     vg = grid.getVolumeGrid()
     m,n,p = vg.dims[0],vg.dims[1],vg.dims[2]
     res = np.zeros((m,n,p))
-    for i in xrange(m):
-        for j in xrange(n):
-            for k in xrange(p):
+    for i in range(m):
+        for j in range(n):
+            for k in range(p):
                 res[i,j,k] = vg.get(i,j,k)
     return res
 
 def dump_grid_mat(grid,fn='grid.mat'):
     arr = grid_to_numpy(grid)
     slices = dict()
-    for i in xrange(arr.shape[0]):
+    for i in range(arr.shape[0]):
         slices["slice_%d"%(i,)] = arr[i,:,:]
     scipy.io.savemat(fn,slices)
 
@@ -191,7 +190,7 @@ class RobotKinematicsCache:
     def __init__(self,robot,gridres=0.05,pcres=0.02):
         self.robot = robot
         self.geometry = []
-        for i in xrange(robot.numLinks()):
+        for i in range(robot.numLinks()):
             geom = robot.link(i).geometry()
             if geom.empty():
                 self.geometry.append(None)
@@ -202,7 +201,7 @@ class RobotKinematicsCache:
         """Updates the robot configuration and PenetrationDepthGeometry transforms"""
         if self.dirty:
             self.robot.setConfig(q)
-            for i in xrange(self.robot.numLinks()):
+            for i in range(self.robot.numLinks()):
                 if self.geometry[i] is None: continue
                 self.geometry[i].setTransform(self.robot.link(i).getTransform())
             self.dirty = False
@@ -247,14 +246,14 @@ class RobotTrajectoryCache:
         self.interMilestoneLipschitzBounds = []
         self.lipschitzConstants = np.zeros((self.robot.numLinks(),self.robot.numLinks()))
         radii = np.zeros((self.robot.numLinks(),self.robot.numLinks()))
-        ancestors = [[] for i in xrange(self.robot.numLinks())]
-        for l in xrange(self.robot.numLinks()):
+        ancestors = [[] for i in range(self.robot.numLinks())]
+        for l in range(self.robot.numLinks()):
             link = self.robot.link(l)
             p = link.getParent()
             if p >= 0: 
                 ancestors[l] = [p] + ancestors[p]
         qmin,qmax = robot.getJointLimits()
-        for l in xrange(self.robot.numLinks()):
+        for l in range(self.robot.numLinks()):
             link = self.robot.link(l)
             p = link.getParent()
             if p >= 0: 
@@ -271,7 +270,7 @@ class RobotTrajectoryCache:
                 Kgeom = 0
                 pc = self.kinematics.geometry[l].pcdata
                 npoints = pc.numPoints()
-                for i in xrange(npoints):
+                for i in range(npoints):
                     k = i*3
                     v = (pc.vertices[k],pc.vertices[k+1],pc.vertices[k+2])
                     if p < 0:
@@ -290,12 +289,12 @@ class RobotTrajectoryCache:
             self.trajectory = self.stateToTrajectory(x)
             m = len(self.trajectory.milestones)
             self.interMilestoneLipschitzBounds = []
-            for i in xrange(m-1):
+            for i in range(m-1):
                 self.interMilestoneLipschitzBounds.append(self.workspaceMovementBounds(self.trajectory.milestones[i],self.trajectory.milestones[i+1]))
             self.linkTransforms = []
-            for i in xrange(m):
+            for i in range(m):
                 self.robot.setConfig(self.trajectory.milestones[i])
-                self.linkTransforms.append([self.robot.link(j).getTransform() for j in xrange(self.robot.numLinks())])
+                self.linkTransforms.append([self.robot.link(j).getTransform() for j in range(self.robot.numLinks())])
             self.dirty = False
         return
     def clear(self):
@@ -328,7 +327,7 @@ class RobotTrajectoryCache:
             times += x[:m]
         assert itimeend+m*n == len(x)
         k = itimeend
-        for i in xrange(m):
+        for i in range(m):
             assert k+n <= len(x)
             milestones.append(list(x[k:k+n]))
             k += n
@@ -340,7 +339,7 @@ class RobotTrajectoryCache:
             if self.times == True or hasattr(self.times,'__iter__'):
                 times.append(self.tend)
         if self.times is False:
-            times = [self.tstart + float(i)/(len(milestones)-1)*(self.tend-self.tstart) for i in xrange(len(milestones))]
+            times = [self.tstart + float(i)/(len(milestones)-1)*(self.tend-self.tstart) for i in range(len(milestones))]
         return RobotTrajectory(self.robot,times,milestones)
     def trajectoryToState(self,traj):
         """Returns a state x that encodes the given trajectory"""
@@ -363,7 +362,7 @@ class RobotTrajectoryCache:
         qend = (self.qend if self.qend is not None else self.qstart)
         sshift = 1
         eshift = (1 if self.qend is not None else 0)
-        us = [float(i+sshift)/(self.numPoints+sshift+eshift-1) for i in xrange(self.numPoints)]
+        us = [float(i+sshift)/(self.numPoints+sshift+eshift-1) for i in range(self.numPoints)]
         qs = [self.robot.interpolate(self.qstart,qend,u) for u in us]
         ts = ([] if self.times is not True else [self.tstart+u*(self.tend-self.tstart) for u in us])
         return ts + sum(qs,[])
@@ -520,7 +519,7 @@ class TrajectoryLengthObjective(ObjectiveFunctionInterface):
     def value(self,x):
         self.trajcache.set(x)
         l = 0
-        for i in xrange(len(self.trajcache.trajectory.milestones)-1):
+        for i in range(len(self.trajcache.trajectory.milestones)-1):
             l += self.trajcache.robot.distance(self.trajcache.trajectory.milestones[i],self.trajcache.trajectory.milestones[i+1])**2
         self.trajcache.clear()
         return l
@@ -531,8 +530,8 @@ class TrajectoryLengthObjective(ObjectiveFunctionInterface):
             eshift = (1 if self.trajcache.qend is not None else 0)
             nfree = len(self.trajcache.trajectory.milestones)-sshift-eshift
             assert nfree == self.trajcache.numPoints
-            blocks = [[None]*nfree for i in xrange(nfree)]
-            for i in xrange(sshift,sshift+self.trajcache.numPoints):
+            blocks = [[None]*nfree for i in range(nfree)]
+            for i in range(sshift,sshift+self.trajcache.numPoints):
                 k = i-sshift
                 if i == 0:
                     #first block, free endpoint
@@ -602,7 +601,7 @@ class RobotLinkTrajectoryCollisionConstraint(SemiInfiniteConstraintInterface):
         dmin = float('inf') if bound is None else bound
         tmin = None
         dmilestones = []
-        for i in xrange(len(traj.milestones)):
+        for i in range(len(traj.milestones)):
             #self.trajectory.robot.setConfig(q)
             geom.setTransform(self.trajectory.linkTransforms[i][self.link.index])
             dbnd = 1000
@@ -619,7 +618,7 @@ class RobotLinkTrajectoryCollisionConstraint(SemiInfiniteConstraintInterface):
         if self.verbose >= 1: print("At milestones, minimum distance is",dmin,"at time",tmin)
         epsilon = 1e-2
         edgequeue = []
-        for i in xrange(len(traj.milestones)-1):
+        for i in range(len(traj.milestones)-1):
             di = dmilestones[i]
             dn = dmilestones[i+1]
             dbnd = self.trajectory.interMilestoneLipschitzBounds[i][self.link.index]
@@ -695,7 +694,7 @@ class RobotTrajectoryCollisionConstraint(SemiInfiniteConstraintInterface):
         self.epsilon = 1e-2
         self.activeLinks = []
         qmin,qmax = self.trajectory.robot.getJointLimits()
-        for i in xrange(self.trajectory.robot.numLinks()):
+        for i in range(self.trajectory.robot.numLinks()):
             if qmin[i] < qmax[i]:
                 self.activeLinks.append(i)
             else:
@@ -735,10 +734,10 @@ class RobotTrajectoryCollisionConstraint(SemiInfiniteConstraintInterface):
         envmin = None
         tmin = None
         qmin = None
-        active_milestones = [dict() for i in xrange(len(traj.milestones))]
+        active_milestones = [dict() for i in range(len(traj.milestones))]
         for link in self.activeLinks[::-1]:
             geom = self.trajectory.kinematics.geometry[link]
-            for i in xrange(len(traj.milestones)):
+            for i in range(len(traj.milestones)):
                 #self.trajectory.robot.setConfig(q)
                 geom.setTransform(self.trajectory.linkTransforms[i][link])
                 dbnd = 1000
@@ -762,7 +761,7 @@ class RobotTrajectoryCollisionConstraint(SemiInfiniteConstraintInterface):
                         linkmin = link
         if self.verbose>=1: print("Among all milestones, minimum distance is",dmin,"on link",linkmin,"at time",tmin)
         edgequeue = []
-        for i in xrange(len(traj.milestones)-1):
+        for i in range(len(traj.milestones)-1):
             di = active_milestones[i]
             dn = active_milestones[i+1]
             dbnd = self.trajectory.interMilestoneLipschitzBounds[i]
@@ -871,7 +870,7 @@ class RobotTrajectoryCollisionConstraint(SemiInfiniteConstraintInterface):
             tmin_bf = None
             linkmin_bf = None
             envmin_bf = None
-            for i in xrange(1001):
+            for i in range(1001):
                 u = float(i)/1000.0
                 t = self.trajectory.trajectory.times[0] + u*self.trajectory.trajectory.duration()
                 q = self.trajectory.trajectory.eval(t)
@@ -996,7 +995,7 @@ def makeCollisionConstraints(obj,envs,gridres=0,pcres=0):
         robot = obj.robot
         res = []
         pairs = []
-        for i in xrange(robot.numLinks()):
+        for i in range(robot.numLinks()):
             link = robot.link(i)
             if link.geometry().empty(): continue
             if TEST_PYCCD:
@@ -1184,9 +1183,9 @@ def optimizeCollFreeRobot(robot,env,qdes=None,qinit=None,objective=None,constrai
         qbest = qinit
         t0 = time.time()
         maxSamples = 50
-        for sample in xrange(maxSamples):
+        for sample in range(maxSamples):
             rad = float(sample)/(maxSamples-1)
-            for i in xrange(len(qdes)):
+            for i in range(len(qdes)):
                 u = (random.uniform(-1,1)**2 + 1)*0.5
                 vmin = qdes[i] + rad*(qmin[i]-qdes[i])
                 vmax = qdes[i] + rad*(qmax[i]-qdes[i])
@@ -1281,7 +1280,7 @@ def optimizeCollFreeTrajectory(trajcache,traj0,env,objective=None,constraints=No
             if verbose >= 1: print("   Reduced start config g(x) from",res.gx0,"to",res.gx)
             traj0.milestones[0] = res.x
             qlast = res.x
-        for i in xrange(1,len(traj0.milestones)-1):
+        for i in range(1,len(traj0.milestones)-1):
             qobjective = RobotConfigObjective(robot,traj0.milestones[i])
             print("  Target",i,"=",traj0.milestones[i])
             res = optimizeSemiInfinite(qobjective,greedyconstraints,qlast,qmin,qmax,verbose=0,settings=settings)
@@ -1321,7 +1320,7 @@ def optimizeCollFreeTrajectory(trajcache,traj0,env,objective=None,constraints=No
         for e in env:
             if not isinstance(e,PenetrationDepthGeometry):
                 e = PenetrationDepthGeometry(e.geometry())
-            constraints += [RobotLinkTrajectoryCollisionConstraint(robot.link(i),e,trajcache) for i in xrange(robot.numLinks())]
+            constraints += [RobotLinkTrajectoryCollisionConstraint(robot.link(i),e,trajcache) for i in range(robot.numLinks())]
         """
         for i,e in enumerate(env):
             if not isinstance(e,PenetrationDepthGeometry):
