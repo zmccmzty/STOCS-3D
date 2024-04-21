@@ -179,18 +179,22 @@ class TimestepState:
                 raise ValueError("Cannot interpolate states with different dummy lengths")
             if len(a.alpha) != len(b.alpha):
                 raise ValueError("Cannot interpolate states with different alpha lengths")
-        x = vectorops.interpolate(a.x,b.x,u)
+        x = a.x + u*(b.x-a.x)
+        if abs(a.q@a.q - 1) > 1e-5:
+            raise ValueError("Start state quaternion is not normalized")
+        if abs(b.q@b.q - 1) > 1e-5:
+            raise ValueError("End state quaternion is not normalized")
         q = so3.quaternion(so3.interpolate(so3.from_quaternion(a.q),so3.from_quaternion(b.q),u))
-        w = vectorops.interpolate(a.w,b.w,u)
-        v = vectorops.interpolate(a.v,b.v,u)
+        w = a.w + u*(b.w-a.w)
+        v = a.v + u*(b.v-a.v)
         index_set = [vectorops.interpolate(a.index_set[i],b.index_set[i],u) for i in range(len(a.index_set))]
-        fenv = [vectorops.interpolate(a.fenv[i],b.fenv[i],u) for i in range(len(a.fenv))]
-        fmnp = [vectorops.interpolate(a.fmnp[i],b.fmnp[i],u) for i in range(len(a.fmnp))]
+        fenv = [a.fenv[i]+u*(b.fenv[i]-a.fenv[i]) for i in range(len(a.fenv))]
+        fmnp = [a.fmnp[i]+u*(b.fmnp[i]-a.fmnp[i]) for i in range(len(a.fmnp))]
         d = vectorops.interpolate(a.d,b.d,u)
         gamma = vectorops.interpolate(a.gamma,b.gamma,u)
         dummy = vectorops.interpolate(a.dummy,b.dummy,u)
         alpha = vectorops.interpolate(a.alpha,b.alpha,u)
-        return TimestepState(x=x,q=q,v=v,w=w,index_set=index_set,fenv=fenv,fmnp=fmnp,d=d,gamma=gamma,dummy=dummy,alpha=alpha)
+        return TimestepState(x=x,q=np.array(q),v=v,w=w,index_set=index_set,fenv=fenv,fmnp=fmnp,d=d,gamma=gamma,dummy=dummy,alpha=alpha)
 
 
 @dataclass
@@ -215,9 +219,9 @@ class TrajectoryState:
         x = [s.x for s in self.states]
         w = [s.w for s in self.states]
         v = [s.v for s in self.states]
-        fenv = [np.stack(s.fenv) for s in self.states]
-        fmnp = [np.stack(s.fmnp) for s in self.states]
-        return {'q':np.array(q),'x':np.array(x),'w':np.array(w),'v':np.array(v),'fenv':np.stack(fenv),'fmnp':np.stack(fmnp)}
+        fenv = [np.concatenate(s.fenv) for s in self.states]
+        fmnp = [np.concatenate(s.fmnp) for s in self.states]
+        return {'q':np.array(q),'x':np.array(x),'w':np.array(w),'v':np.array(v),'fenv':np.concatenate(fenv),'fmnp':np.concatenate(fmnp)}
 
     @staticmethod
     def interpolate(a : TrajectoryState, b: TrajectoryState, u : float) -> TrajectoryState:
@@ -353,18 +357,18 @@ class STOCS(object):
 
             #consider removing points
             for j,point in enumerate(iterate.states[ti].index_set):
-                mindist = min(environment.distance(point)[0] for environment in self.problem.environments)
+                mindist = min(environment.distance(point[:3])[0] for environment in self.problem.environments)
                 if mindist > self.optimization_params.oracle_params.remove_threshold:
                     removed_points[ti].append(j)
             
         return new_points,removed_points
 
-    def set_initialization(self, initial : Optional[Union[TrajectoryState,SE3Trajectory]] = None):
+    def set_initial_state(self, initial : Optional[Union[TrajectoryState,SE3Trajectory]] = None):
         """Initializes the optimizer according to the initialization parameter
         or with a given initial trajectory.
         """
         if initial is None:
-            times = np.arange(0,self.problem.N*self.problem.time_step,self.problem.time_step)
+            times = np.arange(0,self.problem.N*self.problem.time_step,self.problem.time_step).tolist()
             fmnp = [np.array([1e-3] + [1e-3]*self.optimization_params.friction_dim) for i in range(len(self.problem.manipulation_contact_points))]
             initial_states = []
             for i in range(self.N):
@@ -383,7 +387,7 @@ class STOCS(object):
                 else:
                     raise ValueError(f"Invalid initialization type {self.optimization_params.initialization}")
                 
-                initial_states.append(TimestepState(x=T[1],q=so3.quaternion(T[0]),v=v,w=w,index_set=[],fenv=[],fmnp=copy.deepcopy(fmnp),d=[],gamma=[],dummy=[],alpha=[]))
+                initial_states.append(TimestepState(x=np.array(T[1]),q=np.array(so3.quaternion(T[0])),v=v,w=w,index_set=[],fenv=[],fmnp=copy.deepcopy(fmnp),d=[],gamma=[],dummy=[],alpha=[]))
             self.current_iterate = TrajectoryState(initial_states, times)
         elif isinstance(initial,TrajectoryState):
             self.current_iterate = TrajectoryState
@@ -395,10 +399,11 @@ class STOCS(object):
         iter = 0
         if self.current_iterate is None:
             #initialize, if necessary
-            self.set_initialization()
+            self.set_initial_state()
 
         stocs_res = Result(is_success=False,total_iter=0,iterates=[],final=replace(self.current_iterate))
-        
+        mpcc = MPCC(self.problem,self.optimization_params,self.current_iterate)
+        print("Initial score function",self._score_function(mpcc,self.current_iterate))
         while iter < self.optimization_params.stocs_max_iter:
             #call oracle
             new_index_set, removed_index_set = self.oracle(self.current_iterate)
@@ -406,11 +411,11 @@ class STOCS(object):
             #update / initialize variables
             for i in range(self.N):
                 statei = self.current_iterate.states[i]
-                #remove index points and variables
-                for j in removed_index_set[i]:
+                #remove index points and variables -- go backwards to avoid index shifting
+                for j in removed_index_set[i][::-1]:
+                    assert j < len(statei.index_set)
                     statei.index_set.pop(j)
                     statei.fenv.pop(j)
-                    statei.fmnp.pop(j)
                     statei.d.pop(j)
                     if self.optimization_params.velocity_complementarity:
                         statei.gamma.pop(j)
@@ -425,7 +430,7 @@ class STOCS(object):
 
                 for j in range(len(new_index_set[i])):
                     #initialize force to a small force
-                    statei.fenv.append([1e-3] + [1e-3]*self.optimization_params.friction_dim)
+                    statei.fenv.append(np.array([1e-3] + [1e-3]*self.optimization_params.friction_dim))
                 
                 statei.d += [0.0]*len(new_index_set[i])
                 
@@ -444,7 +449,7 @@ class STOCS(object):
             #TODO: THIS IS A HACK! need to make the iteration growth rate a proper parameter
             self.optimization_params.max_mpcc_iter = min(5+5*iter,100)
             mpcc = MPCC(self.problem,self.optimization_params,self.current_iterate)
-            print(f"Start the solving of iteration {iter}")
+            print(f"MPCC solve iteration {iter}, current state score {self._score_function(mpcc,self.current_iterate)}")
 
             def print_dots(stop_event):
                 while not stop_event.is_set():
@@ -453,7 +458,7 @@ class STOCS(object):
 
             stop_event = threading.Event()
 
-            dot_thread = threading.Thread(target=print_dots, args=(stop_event,))
+            dot_thread = threading.Thread(target=print_dots, args=(stop_event,), daemon=True)
             dot_thread.start()
             try:
                 res_target = mpcc.solve()
@@ -470,7 +475,7 @@ class STOCS(object):
             #convergence check
 
             #compute state differences
-            diffs = [prev_flat[s_var] - new_flat[s_var] for s_var in ['q','x','w','v']]
+            diffs = [(prev_flat[s_var] - new_flat[s_var]).flatten() for s_var in ['q','x','w','v']]
             var_diff = np.concatenate(diffs)
             
             n_index_points = sum(len(s.index_set) for s in self.current_iterate.states)
@@ -498,6 +503,7 @@ class STOCS(object):
     def _line_search(self, mpcc : MPCC,res_target : TrajectoryState, res_current : TrajectoryState):
         current_score = self._score_function(mpcc,res_current)
         target_score = self._score_function(mpcc,res_target)
+        res_temp = res_target
 
         iter_ls = 0
         step_size = 1
@@ -599,9 +605,8 @@ class STOCS(object):
                 
                 # Velocity Comp
                 if self.optimization_params.velocity_complementarity:
-                    for k in range(self.optimization_params.friction_dim):
-                        constraint_value = mpcc.velocity_cc_constraint(res.states[i].index_set[j],k,s.q,s.x,s.v,s.w,s.gamma[j],s.fenv[j])
-                        residual += abs(min(self.optimization_params.comp_threshold - constraint_value[0],0))                   
+                    constraint_value = mpcc.velocity_cc_constraint(res.states[i].index_set[j],s.q,s.x,s.v,s.w,s.gamma[j],s.fenv[j])
+                    residual += np.sum(np.abs(np.minimum(self.optimization_params.comp_threshold - constraint_value[0:self.optimization_params.friction_dim],0)))               
                     residual += abs(min(self.optimization_params.comp_threshold - s.dummy[j]*s.gamma[j],0))
 
         return residual
@@ -610,8 +615,8 @@ class STOCS(object):
         residual = 0
         for i in range(self.N):
             s = res.states[i]
-            residual += np.sum(np.abs(mpcc.force_balance_constraint(i,s.q,s.x,s.v,np.asarray(s.fmnp),np.asarray(s.fenv))))
-            residual += np.sum(np.abs(mpcc.torque_balance_constraint(i,s.q,s.x,s.w,np.asarray(s.fmnp),np.asarray(s.fenv))))
+            residual += np.sum(np.abs(mpcc.force_balance_constraint(i,s.q,s.x,s.v,np.asarray(s.fenv),np.asarray(s.fmnp))))
+            residual += np.sum(np.abs(mpcc.torque_balance_constraint(i,s.q,s.x,s.w,np.asarray(s.fenv),np.asarray(s.fmnp))))
 
         return residual
 
@@ -659,8 +664,10 @@ class MPCC(object):
         return f
     
     def force_balance_constraint(self, t : int, q, x, v, f_env, f_mnp):
-        assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}"
-        assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}"
+        if len(self.iterate.states[t].index_set) > 0:
+            assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}: {f_env.shape} vs {(len(self.iterate.states[t].index_set),(self.friction_dim+1))}"
+        if len(self.problem.manipulation_contact_points) > 0:
+            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}: {f_mnp.shape} vs {(len(self.problem.manipulation_contact_points),(self.friction_dim+1))}"
         R = so3.from_quaternion(q)
 
         force = 0
@@ -691,8 +698,10 @@ class MPCC(object):
                 return np.array([force[0],force[1],force[2]])
 
     def torque_balance_constraint(self,t : int, q, x, w, f_env, f_mnp):
-        assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}"
-        assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}"
+        if len(self.iterate.states[t].index_set) > 0:
+            assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}"
+        if len(self.problem.manipulation_contact_points) > 0:
+            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}"
         R = so3.from_quaternion(q)
         com_world = se3.apply((R,x),self.problem.manipuland_com)
 
@@ -757,7 +766,7 @@ class MPCC(object):
     def backward_euler_x(self, x, xprev, v, dt):
         return x - (xprev + v*dt)
 
-    def force_on_off(self,point,q, x, f, alpha=None):
+    def force_on_off(self,point, q, x, f, alpha=None):
         raise NotImplementedError("Force_on_off was an experimental hack and is not implemented in the current version of STOCS")
         if self.param.use_alpha:
             point_world = se3.apply((so3.from_quaternion(q),x),point)
@@ -777,11 +786,20 @@ class MPCC(object):
         tangential directions.
 
         Returns k*2 elements.  The first k elements are the complementarity
-        conditions on tangential velocities and forces, and the last k elements
-        set gamma > 0 if the velocity is opposing the tangent direction.
-        
-        gamma + v_t[j] > 0  =>  gamma >= -v_t[j]
-        gamma + v_t[j]*f_t[j] <= 0 => (since f_t[j]>=0) f_t[j]
+        conditions on tangential velocities and forces, v_t[j]*f_t[j] <= 0,
+        and the last k elements set conditions on gamma, gamma + v_t[j] >= 0 
+
+        These are coupled with the dummy variable complementarity conditions        
+
+            dummy = fn*mu - sum(f_t[j]) >= 0
+            dummy*gamma == 0
+
+        When friction is not at the limit, dummy > 0, and gamma = 0.  This means that both v and gamma
+        have to be 0 as desired.
+                
+        At friction cone limit, we have dummy = 0, which lets v and f be anything that
+        gives gamma a way to satisfy bounds given by these constraints.
+
         """
         R = so3.from_quaternion(q)
         v_relative = vectorops.cross(w,so3.apply(R,point))
@@ -798,7 +816,8 @@ class MPCC(object):
         for j in range(self.friction_dim):
             phi = (2*math.pi/int(self.friction_dim))*j
             T_friction = so3.apply(N_frame,(0,math.cos(phi),math.sin(phi)))
-            res1.append(gamma + vectorops.dot(v_tangential,T_friction)*f[j+1])
+            #res1.append(gamma + vectorops.dot(v_tangential,T_friction)*f[j+1])
+            res1.append(vectorops.dot(v_tangential,T_friction)*f[j+1])
             res2.append(gamma + vectorops.dot(v_tangential,T_friction))
         return np.array(res1+res2)
 
@@ -1075,6 +1094,7 @@ class MPCC(object):
 
         #parse solution
         qs = result.GetSolution(self.q)
+        qs = [q/np.linalg.norm(q) for q in qs]
         xs = result.GetSolution(self.x)
         ws = result.GetSolution(self.w)
         vs = result.GetSolution(self.v)
@@ -1083,12 +1103,14 @@ class MPCC(object):
             new_states.append(replace(self.iterate.states[i],q=qs[i],x=xs[i],w=ws[i],v=vs[i]))
             new_states[-1].fenv = result.GetSolution(self.force_vars['fenv_'+str(i)])
             new_states[-1].fmnp = result.GetSolution(self.force_vars['fmnp_'+str(i)])
-            new_states[-1].d = result.GetSolution(self.d_vars[i])
+            new_states[-1].fenv = [f for f in new_states[-1].fenv]  #convert to list
+            new_states[-1].fmnp = [f for f in new_states[-1].fmnp]  #convert to list
+            new_states[-1].d = result.GetSolution(self.d_vars[i]).tolist()
             if self.param.velocity_complementarity:
-                new_states[-1].gamma = result.GetSolution(self.gamma_vars[i])
-                new_states[-1].dummy = result.GetSolution(self.dummy_vars[i])
+                new_states[-1].gamma = result.GetSolution(self.gamma_vars[i]).tolist()
+                new_states[-1].dummy = result.GetSolution(self.dummy_vars[i]).tolist()
             if self.param.use_alpha:
-                new_states[-1].alpha = result.GetSolution(self.alpha_vars[i])
+                new_states[-1].alpha = result.GetSolution(self.alpha_vars[i]).tolist()
         return TrajectoryState(new_states,self.iterate.times)
 
 
@@ -1127,7 +1149,7 @@ if __name__ == '__main__':
         print(f"The 'params' attribute was not found in the module {module_name}")
         exit(1)
     else:
-        print(f"Successfully imported 'params' from {module_name}")
+        print(f"Imported 'problem' and 'params' from {module_name}")
         print(f"Environment: {environment}")
         print(f"Manipuland: {manipuland}")
         print(f"Number of time steps: {problem.N}")
