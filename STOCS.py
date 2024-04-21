@@ -6,12 +6,12 @@ import math
 from functools import partial
 from klampt.math import vectorops,so3,se3
 from klampt.model.trajectory import SE3Trajectory
-from pydrake.all import MathematicalProgram, Solve, eq, le, ge, SolverOptions, SnoptSolver, IpoptSolver, NloptSolver, CommonSolverOption
+from pydrake.all import MathematicalProgram, Variable, Solve, eq, le, ge, SolverOptions, SnoptSolver, IpoptSolver, NloptSolver, CommonSolverOption
 from pydrake.autodiffutils import AutoDiffXd
 from semiinfinite.geometryopt import *
 import threading
 from utils import *
-from typing import List,Tuple,Dict,Optional,Union
+from typing import List,Tuple,Dict,Optional,Union,Callable
 from klampt.model.typing import RigidTransform,Vector3
 from dataclasses import dataclass,replace
 
@@ -56,18 +56,63 @@ class Problem:
             if debug:
                 from klampt import vis
                 environment_mesh = self.environment_sdf_cache.geom.convert('TriangleMesh')
-                vis.debug(environment_mesh,title="Environment SDF")
+                vis.debug(SDF=environment_mesh,title="Environment SDF")
+
+    @staticmethod
+    def from_world(world : WorldModel, rigidObject=0, grid_res=0.005, pc_res=0.005) -> Problem:
+        """Constructs the geometric elements of a Problem from a Klamp't WorldModel.
+
+        The manipulator, time steps, bounds, and other parameters must be set manually.
+        """
+        if world.numRigidObjects() == 0:
+            raise ValueError("World has no rigid objects")
+        if rigidObject >= world.numRigidObjects():
+            raise ValueError("Invalid rigid object index")
+        rigidObject = world.rigidObject(rigidObject)
+        terrains = [world.terrain(i) for i in range(world.numTerrains())]
+        pose = rigidObject.getTransform()
+        mass = rigidObject.getMass()
+        manipuland_geom = PenetrationDepthGeometry(rigidObject.geometry(),grid_res,pc_res)
+        terrain_geoms = [PenetrationDepthGeometry(terrain.geometry(),grid_res,pc_res) for terrain in terrains]
+        return Problem(manipuland=manipuland_geom,manipuland_mass=mass.getMass(),manipuland_com=mass.getCom(),manipuland_inertia=mass.getInertia(),
+                       environments=terrain_geoms,T_init=pose,T_goal=pose,manipulation_contact_points=[],manipulation_contact_normals=[],N=1,time_step=0.1,
+                       x_bound=(vectorops.add(pose[1],[-10]*3),vectorops.add(pose[1],[10]*3)),
+                       v_bound = ([-1]*3,[1]*3))
+    
+    def set_manipulation_from_point(self, point : Vector3, radius_expansion:float=0):
+        """Sets the manipulation contact points and normals from a point,
+        by assuming the manipuland is at its initial pose, and finding the
+        closest point on the manipuland geometry.  All points within this
+        radius + radius_expansion will be considered as contact points.
+        """
+        self.manipuland.setTransform(self.T_init)
+        d,p_self,p_other = self.manipuland.distance(point)
+        if abs(d) < 1e-6:
+            raise ValueError("Point is already in contact with manipuland, can't infer contact normal")
+        if radius_expansion == 0:
+            self.manipulation_contact_points = [se3.apply(se3.inv(self.T_init,p_self))]
+            self.manipulation_contact_normals = [vectorops.unit(vectorops.sub(point,p_self))]
+        else:
+            self.manipulation_contact_points = []
+            self.manipulation_contact_normals = []
+            mpts = self.manipuland.pcdata.getPoints()
+            point_local = se3.apply(se3.inv(self.T_init,point))
+            threshold = (d + radius_expansion)**2
+            for i in range(mpts.shape[0]):
+                if vectorops.distanceSquared(mpts[i],point_local) <= threshold:
+                    self.manipulation_contact_points.append(mpts[i])
+                    self.manipulation_contact_normals.append(vectorops.unit(se3.apply(self.T_init,vectorops.sub(point_local,mpts[i]))))
 
 
 @dataclass
 class SmoothingOracleParams:
     """Defines parameters for the spatio-temporal smoothing oracle."""
-    add_threshold: float                    # Distance threshold to add active points
-    remove_threshold: float                 # Distance threshold to remove active points.  Should be greater than add_threshold
+    add_threshold: float                            # Distance threshold to add active points
+    remove_threshold: float                         # Distance threshold to remove active points.  Should be greater than add_threshold
     translation_disturbances: Optional[List[float]]=None   # Disturbances for spatial smoothing
     rotation_disturbances: Optional[List[float]]=None      # Disturbances for spatial smoothing
-    time_step: int = 1                      # Time step for temporal smoothing. 1 gives reasonable results
-    duplicate_detection_threshold: float = 1e-3    # Threshold for detecting duplicate points
+    time_smoothing_step: int = 1                    # Time step for temporal smoothing. 1 gives reasonable results
+    duplicate_detection_threshold: float = 1e-3     # Threshold for detecting duplicate points
 
 
 @dataclass
@@ -111,7 +156,7 @@ class TimestepState:
 
     def pose(self) -> RigidTransform:
         """Returns the manipuland pose as a RigidTransform"""
-        return (so3.from_quaternion(self.q),self.x.tolist())
+        return (so3.from_quaternion(self.q),[v for v in self.x])
 
     @staticmethod
     def interpolate(a : TimestepState, b : TimestepState, u : float, strict=True) -> TimestepState:
@@ -218,11 +263,11 @@ class STOCS(object):
         are lists of lists.  The new points are (x,y,z,env_index) tuples, and the
         removed points are indices into the previous index set.
         """
-        time_smoothing_step = self.optimization_params.oracle_params.time_step
+        time_smoothing_step = self.optimization_params.oracle_params.time_smoothing_step
 
         closest_points = [[] for _ in range(self.N)]
         for i,state in enumerate(iterate.states):           
-            closest_points_ti = closest_points[ti]
+            closest_points_ti = closest_points[i]
 
             Ti = state.pose()
             Ri,xi = Ti
@@ -296,7 +341,7 @@ class STOCS(object):
             #check if the point is new or existing (TODO: do duplicate checking faster?)
             for point in index_set[ti]:
                 dist_min = np.inf
-                for point2 in iterate.states[ti].index_set:
+                for point2 in iterate.states[ti].index_set + new_points[ti]:
                     dist = vectorops.norm(vectorops.sub(point,point2))
                     if dist < dist_min:
                         dist_min = dist
@@ -320,6 +365,7 @@ class STOCS(object):
         """
         if initial is None:
             times = np.arange(0,self.problem.N*self.problem.time_step,self.problem.time_step)
+            fmnp = [np.array([1e-3] + [1e-3]*self.optimization_params.friction_dim) for i in range(len(self.problem.manipulation_contact_points))]
             initial_states = []
             for i in range(self.N):
                 T = None
@@ -337,7 +383,7 @@ class STOCS(object):
                 else:
                     raise ValueError(f"Invalid initialization type {self.optimization_params.initialization}")
                 
-                initial_states.append(TimestepState(x=T[1],q=so3.quaternion(T[0]),v=v,w=w,index_set=[],fenv=[],fmnp=[],d=[],gamma=[],dummy=[],alpha=[]))
+                initial_states.append(TimestepState(x=T[1],q=so3.quaternion(T[0]),v=v,w=w,index_set=[],fenv=[],fmnp=copy.deepcopy(fmnp),d=[],gamma=[],dummy=[],alpha=[]))
             self.current_iterate = TrajectoryState(initial_states, times)
         elif isinstance(initial,TrajectoryState):
             self.current_iterate = TrajectoryState
@@ -393,7 +439,7 @@ class STOCS(object):
             stocs_res.iterates.append(copy.deepcopy(self.current_iterate))
             stocs_res.final = stocs_res.iterates[-1]
             stocs_res.total_iter = iter
-            print(f"Index points for each time step along the trajectory: {[len(sublist) for sublist in self.current_iterate.states]}")
+            print(f"Index points for each time step along the trajectory: {[len(s.index_set) for s in self.current_iterate.states]}")
 
             #TODO: THIS IS A HACK! need to make the iteration growth rate a proper parameter
             self.optimization_params.max_mpcc_iter = min(5+5*iter,100)
@@ -444,7 +490,9 @@ class STOCS(object):
         return stocs_res
 
     def _score_function(self,mpcc : MPCC,res : TrajectoryState):
-        score = mpcc.cost_fun(res) + self._constraint_violation(mpcc,res)
+        qtraj = [s.q for s in res.states]
+        xtraj = [s.x for s in res.states]
+        score = mpcc.cost_fun(qtraj,xtraj) + self._constraint_violation(mpcc,res)
         return score
 
     def _line_search(self, mpcc : MPCC,res_target : TrajectoryState, res_current : TrajectoryState):
@@ -512,8 +560,9 @@ class STOCS(object):
     def _integration_constraint_violation(self,mpcc : MPCC,res : TrajectoryState):
         violation = 0
         for i in range(1,self.N):
-            Tprev = mpcc.backward_euler(res.states[i],self.problem.time_step)
-            violation += np.sum(se3.error(Tprev,res.states[i-1].pose()))
+            qerr = mpcc.backward_euler_q(res.states[i].q,res.states[i-1].q,res.states[i].w,self.problem.time_step)
+            xerr = mpcc.backward_euler_x(res.states[i].x,res.states[i-1].x,res.states[i].v,self.problem.time_step)
+            violation += np.sum(np.abs(qerr)) + np.sum(np.abs(xerr))
 
         return violation
 
@@ -543,17 +592,17 @@ class STOCS(object):
     def _complimentarity_residual(self,mpcc : MPCC, res : TrajectoryState):
         residual = 0
         for i in range(self.N):
-            for j in range(len(res.states[i].index_set)):
+            s = res.states[i]
+            for j in range(len(s.index_set)):
                 # Position Comp
-                residual += abs(min(self.optimization_params.comp_threshold-res.states[i].fenv[j][0]*res.states[i].d[j],0))
+                residual += abs(min(self.optimization_params.comp_threshold-s.fenv[j][0]*s.d[j],0))
                 
                 # Velocity Comp
                 if self.optimization_params.velocity_complementarity:
                     for k in range(self.optimization_params.friction_dim):
-                        x_ = np.concatenate([res.states[i].q,res.states[i].w,res.states[i].x,res.states[i].v,res.states[i].gamma[j],res.states[i].fenv[j][k+1]])
-                        constraint_value = partial(mpcc.velocity_cc_constraint,res.states[i].index_set,k)(x_)
+                        constraint_value = mpcc.velocity_cc_constraint(res.states[i].index_set[j],k,s.q,s.x,s.v,s.w,s.gamma[j],s.fenv[j])
                         residual += abs(min(self.optimization_params.comp_threshold - constraint_value[0],0))                   
-                    residual += abs(min(self.optimization_params.comp_threshold - res.states[i].dummy[j]*res.states[i].gamma[j],0))
+                    residual += abs(min(self.optimization_params.comp_threshold - s.dummy[j]*s.gamma[j],0))
 
         return residual
 
@@ -561,8 +610,8 @@ class STOCS(object):
         residual = 0
         for i in range(self.N):
             s = res.states[i]
-            residual += np.sum(np.abs(mpcc.force_balance_constraint(i,s.q,s.x,s.v,np.concat(s.fmnp+s.fenv))))
-            residual += np.sum(np.abs(mpcc.torque_balance_constraint(i,s.q,s.x,s.w,np.concat(s.fmnp+s.fenv)))) 
+            residual += np.sum(np.abs(mpcc.force_balance_constraint(i,s.q,s.x,s.v,np.asarray(s.fmnp),np.asarray(s.fenv))))
+            residual += np.sum(np.abs(mpcc.torque_balance_constraint(i,s.q,s.x,s.w,np.asarray(s.fmnp),np.asarray(s.fenv))))
 
         return residual
 
@@ -576,9 +625,6 @@ class MPCC(object):
 
         # Optimization parameters
         self.N = self.problem.N 
-        self.initial_pose_relaxation = self.problem.initial_pose_relaxation
-        self.goal_pose_relaxation = self.problem.goal_pose_relaxation
-        self.comp_threshold = self.param.comp_threshold
         self.friction_dim = self.param.friction_dim
         self.prog = None
 
@@ -596,125 +642,88 @@ class MPCC(object):
         point_world = se3.apply((so3.from_quaternion(q),x),point)     
         dist = self.environment_distance(point_world)
 
-        res = dist - d[0]
+        res = dist - d
 
         return np.array([res])
-        
-    def force_balance_constraint(self, t : int, q, x, v, f):
-
-        env_force_dim = (self.friction_dim+1)*len(self.iterate.states[t].index_set)
-        f_env, f_mnp = np.split(f, [env_force_dim])
+    
+    def force_3d(self, f_vec : np.ndarray, normal : Vector3) -> Vector3:
+        """Given a force encoded as normal force + tangential forces, returns
+        the 3D force vector."""
+        assert len(f_vec) == 1+self.friction_dim, "Invalid size of f_vec provided to force_3d()"
+        N_frame = so3.canonical(normal)
+        f = vectorops.mul(normal,f_vec[0])
+        for j in range(self.friction_dim):
+            phi = (2*math.pi/int(self.friction_dim))*j
+            T_friction = so3.apply(N_frame,(0,math.cos(phi),math.sin(phi)))
+            f = vectorops.madd(f,T_friction,f_vec[j+1])
+        return f
+    
+    def force_balance_constraint(self, t : int, q, x, v, f_env, f_mnp):
+        assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}"
+        assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}"
+        R = so3.from_quaternion(q)
 
         force = 0
         # Environment contact 
         for i,point in enumerate(self.iterate.states[t].index_set):
-            
-            f_env_i = f_env[(self.friction_dim+1)*i:(self.friction_dim+1)*(i+1)]
-            
-            point_world = se3.apply((so3.from_quaternion(q),x),point)
+            f_env_i = f_env[i]
+            point_world = se3.apply((R,x),point[:3])
             dir_n = np.asarray(self.environment_distance_gradient(point_world))
             N_normal_ = dir_n / np.linalg.norm(dir_n)
 
-            assert np.linalg.norm(N_normal_) != 0, "Normal is 0!!!"
-            N_normal = N_normal_ / np.linalg.norm(N_normal_)
-
-            n1 = so3.canonical(N_normal)[3:6]
-            n2 = so3.canonical(N_normal)[6:9]
-
-            N_friction = []
-            for j in range(self.friction_dim):
-                n_tmp_ = math.cos((math.pi/int(self.friction_dim/2))*j)*np.array(n1) + math.sin((math.pi/int(self.friction_dim/2))*j)*np.array(n2)
-                n_tmp = n_tmp_ / np.linalg.norm(n_tmp_)
-                N_friction.append(n_tmp)
-
-            force += f_env_i[0]*np.array(N_normal)
-
-            for j in range(len(N_friction)):
-                force += f_env_i[j+1]*np.array(N_friction[j])
+            assert np.linalg.norm(dir_n) != 0, "Normal is 0!!!"
+            force += np.array(self.force_3d(f_env_i,N_normal_))
         
         # Gravity
         force += np.array([0,0,-self.problem.gravity*self.problem.manipuland_mass])
 
         # Manipulator contact force
-        for i,manipulation_Normal_normal in enumerate(self.problem.manipulation_contact_normals):
-            
-            f_mnp_i = f_mnp[(self.friction_dim+1)*i:(self.friction_dim+1)*(i+1)]
-            manipulation_N_normal = so3.apply(so3.from_quaternion(q),manipulation_Normal_normal)
-            manipulation_N_normal = list(np.array(manipulation_N_normal) / np.linalg.norm(manipulation_N_normal))
-            
-            force += f_mnp_i[0] * np.array(manipulation_N_normal)
-            n1 = so3.canonical(manipulation_N_normal)[3:6]
-            n2 = so3.canonical(manipulation_N_normal)[6:9]
-            
-            manipulation_N_friction = []
-            for j in range(self.friction_dim):
-                n_tmp = (math.cos((math.pi/int(self.friction_dim/2))*j)*np.array(n1) + math.sin((math.pi/int(self.friction_dim/2))*j)*np.array(n2)).tolist()   
-                manipulation_N_friction.append(list(np.array(n_tmp) / np.linalg.norm(n_tmp)))
-            for j,normal in enumerate(manipulation_N_friction):
-                force += f_mnp_i[j+1]*np.array(normal)
+        for i,manipulation_normal in enumerate(self.problem.manipulation_contact_normals):
+            f_mnp_i = f_mnp[i]
+            force += np.array(so3.apply(R,self.force_3d(f_mnp_i,manipulation_normal)))
 
         if self.param.assumption == 'quasi_static':
             return np.array([force[0],force[1],force[2]])
         elif self.param.assumption == 'quasi_dynamic':
-            if self.dt[t] != 0:
-                return force-self.problem.manipuland_mass*v/self.dt[t]
+            if t != 0:
+                return force-self.problem.manipuland_mass*v/self.problem.time_step
             else:
                 return np.array([force[0],force[1],force[2]])
 
-    def torque_balance_constraint(self,t : int, q, x, w, f):
-        env_force_dim = (self.friction_dim+1)*len(self.iterate.states[t].index_set)
-        f_env, f_mnp = np.split(f, [env_force_dim])
+    def torque_balance_constraint(self,t : int, q, x, w, f_env, f_mnp):
+        assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}"
+        assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}"
+        R = so3.from_quaternion(q)
+        com_world = se3.apply((R,x),self.problem.manipuland_com)
 
-        com_world = se3.apply((so3.from_quaternion(q),x),self.problem.manipuland_com)
         torque = 0
 
         # Contact with the environment
         for i,point in enumerate(self.iterate.states[t].index_set):
-            
-            f_env_i = f_env[(self.friction_dim+1)*i:(self.friction_dim+1)*(i+1)]
-            point_world = se3.apply((so3.from_quaternion(q),x),point)
+            f_env_i = f_env[i]
+            point_world = se3.apply((R,x),point[:3])
 
             dir_n_ = np.asarray(self.environment_distance_gradient(point_world))
             N_normal = dir_n_ / np.linalg.norm(dir_n_)
-
-            torque += np.array(vectorops.cross(vectorops.sub(point_world,com_world),vectorops.mul(N_normal,f_env_i[0])))
-
-            n1 = so3.canonical(N_normal)[3:6]
-            n2 = so3.canonical(N_normal)[6:9]
-            N_friction = []
-            for j in range(self.friction_dim):
-                n_tmp = math.cos((math.pi/int(self.friction_dim/2))*j)*np.array(n1) + math.sin((math.pi/int(self.friction_dim/2))*j)*np.array(n2)
-                N_friction.append(list(np.array(n_tmp) / np.linalg.norm(n_tmp)))
-            for j in range(len(N_friction)):
-                torque += np.array(vectorops.cross(vectorops.sub(point_world,com_world),vectorops.mul(N_friction[j],f_env_i[j+1])))
+            
+            force = np.array(self.force_3d(f_env_i,N_normal))
+            torque += np.array(vectorops.cross(vectorops.sub(point_world,com_world),force))
         
         # Contact with the manipulator
-        for i,(manipulation_contact,manipulation_Normal_normal) in enumerate(zip(self.problem.manipulation_contact_points,self.problem.manipulation_contact_normals)):
-            f_mnp_i = f_mnp[(self.friction_dim+1)*i:(self.friction_dim+1)*(i+1)]
-            mnp_contact_world = se3.apply((so3.from_quaternion(q),x),manipulation_contact)
-            manipulation_N_normal = so3.apply(so3.from_quaternion(q),manipulation_Normal_normal)
-            manipulation_N_normal = list(np.array(manipulation_N_normal) / np.linalg.norm(manipulation_N_normal))
-
-            torque += np.array(vectorops.cross(vectorops.sub(mnp_contact_world,com_world),vectorops.mul(so3.apply(so3.from_quaternion(q),manipulation_N_normal),f_mnp_i[0])))
-
-            n1 = so3.canonical(manipulation_N_normal)[3:6]
-            n2 = so3.canonical(manipulation_N_normal)[6:9]
-    
-            manipulation_N_friction = []
-            for j in range(self.friction_dim):
-                n_tmp = (math.cos((math.pi/int(self.friction_dim/2))*j)*np.array(n1) + math.sin((math.pi/int(self.friction_dim/2))*j)*np.array(n2)).tolist()
-                manipulation_N_friction.append(list(np.array(n_tmp) / np.linalg.norm(n_tmp)))
-            for j in range(len(manipulation_N_friction)):
-                torque += np.array(vectorops.cross(vectorops.sub(mnp_contact_world,com_world),vectorops.mul(so3.apply(so3.from_quaternion(q),manipulation_N_friction[j]),f_mnp_i[j+1])))
+        for i,(manipulation_contact,manipulation_normal) in enumerate(zip(self.problem.manipulation_contact_points,self.problem.manipulation_contact_normals)):
+            f_mnp_i = f_mnp[i]
+            force = np.array(so3.apply(R,self.force_3d(f_mnp_i,manipulation_normal))) 
+            mnp_contact_world = se3.apply((R,x),manipulation_contact)
+            torque += np.array(vectorops.cross(vectorops.sub(mnp_contact_world,com_world),force))
 
         if self.param.assumption == 'quasi_static':
             return np.array([torque[0],torque[1],torque[2]])
         elif self.param.assumption == 'quasi_dynamic':
             I_body = self.problem.manipuland_inertia
-            R = np.array(so3.matrix(so3.from_quaternion(q)))
+            R = np.array(so3.matrix(R))
             I_world = R@I_body@R.T
-            if self.dt[t] != 0:
-                return torque - I_world@w/self.dt[t]
+            if t != 0:
+                return torque - I_world@w/self.problem.time_step
             else:
                 return np.array([torque[0],torque[1],torque[2]])
 
@@ -763,26 +772,35 @@ class MPCC(object):
         
             return np.array([np.log(1+np.exp(-1000*dist))*f])
 
-    def velocity_cc_constraint(self,point,i,x_):
+    def velocity_cc_constraint(self,point:Vector3,q,w,x,v,gamma,f):
+        """Constraint that the velocity opposes frictional forces in 
+        tangential directions.
+
+        Returns k*2 elements.  The first k elements are the complementarity
+        conditions on tangential velocities and forces, and the last k elements
+        set gamma > 0 if the velocity is opposing the tangent direction.
         
-        q,w_axis,w_mag,x,v,gamma,f = np.split(x_, [4, 4+3, 7+1, 8+3, 11+3, 14+1])
-        v_relative = vectorops.cross(list(np.array(w_axis)*w_mag),so3.apply(so3.from_quaternion(q),point))
+        gamma + v_t[j] > 0  =>  gamma >= -v_t[j]
+        gamma + v_t[j]*f_t[j] <= 0 => (since f_t[j]>=0) f_t[j]
+        """
+        R = so3.from_quaternion(q)
+        v_relative = vectorops.cross(w,so3.apply(R,point))
         v_real = vectorops.add(v_relative,v)
 
-        point_world = se3.apply((so3.from_quaternion(q),x),point)
+        point_world = se3.apply((R,x),point)
         dir_n_ = np.asarray(self.environment_distance_gradient(point_world))
         N_normal = dir_n_ / np.linalg.norm(dir_n_)
         
         v_tangential = vectorops.sub(v_real,vectorops.mul(N_normal,vectorops.dot(v_real,N_normal)))
-
-        n1 = so3.canonical(N_normal)[3:6]
-        n2 = so3.canonical(N_normal)[6:9]
-
-        n_tmp = (math.cos((math.pi/int(self.friction_dim/2))*i)*np.array(n1) + math.sin((math.pi/int(self.friction_dim/2))*i)*np.array(n2)).tolist()
-        N_friction = list(np.array(n_tmp) / np.linalg.norm(n_tmp)) 
-        res1 = (gamma + vectorops.dot(v_tangential,N_friction))*f
-        res2 = gamma + vectorops.dot(v_tangential,N_friction)
-        return np.array([res1[0],res2[0]])
+        N_frame = so3.canonical(N_normal)
+        res1 = []
+        res2 = []
+        for j in range(self.friction_dim):
+            phi = (2*math.pi/int(self.friction_dim))*j
+            T_friction = so3.apply(N_frame,(0,math.cos(phi),math.sin(phi)))
+            res1.append(gamma + vectorops.dot(v_tangential,T_friction)*f[j+1])
+            res2.append(gamma + vectorops.dot(v_tangential,T_friction))
+        return np.array(res1+res2)
 
     def friction_cone_constraint(self,mu,f_vector):
         fn,ff = np.split(f_vector, [1])
@@ -796,15 +814,98 @@ class MPCC(object):
         res = mu*fn
         for ffi in ff:
             res -= ffi
-        res -= residual[0]
+        res -= residual
         return np.array([res])    
 
-    def cost_fun(self,x_):
-        res = 0*x_[0]
-        return res
+    def cost_fun(self,q_traj,x_traj):
+        return 0.0*x_traj[0][0]
+    
+    def wrap(self,func:Callable,vars:list,
+             pre_args:Tuple=(),
+             post_args:Tuple=(),
+             kwargs:Optional[Dict]=None) -> Tuple[Callable,np.ndarray]:
+        """Automatically encodes and decodes heterogeneous variables to a
+        function into a Drake function and list of variables."""
+        if pre_args or post_args or kwargs:
+            if kwargs is None:
+                kwargs = {}
+            def new_func(*args,pre=pre_args,post=post_args,kw=kwargs):
+                return func(*(pre + args + post),**kwargs)
+            return self.wrap(new_func,vars)
+
+        all_scalar = True
+        concat_list = []
+        size_list = []
+        for v in vars:
+            if isinstance(v,Variable):
+                concat_list.append([v])
+                size_list.append(1)
+            else:
+                if len(v.shape) == 1:
+                    concat_list.append(v)
+                    size_list.append(len(v))
+                elif len(v.shape) == 2:
+                    concat_list.append(v.flatten())
+                    size_list.append(v.shape[0]*v.shape[1])
+                else:
+                    raise NotImplementedError("Only scalar, 1D, and 2D variables are supported")
+                all_scalar = False
+        if all_scalar:
+            # just pass through
+            return func,vars
+        else:
+            split_list = np.cumsum(size_list)[:-1]
+            def flattened_func(x):
+                x_split = np.split(x,split_list)
+                for i in range(len(x_split)):
+                    if isinstance(vars[i],Variable):
+                        x_split[i] = x_split[i][0]
+                    elif len(vars[i].shape)==2:
+                        x_split[i] = x_split[i].reshape(vars[i].shape)
+                return func(*x_split)
+            return flattened_func,np.concatenate(concat_list)
+
+    def add_constraint(self,func:Callable,lb:np.ndarray,ub:np.ndarray,vars:list,
+                       description:Optional[str]=None,
+                       pre_args:Tuple=(),
+                       post_args:Tuple=(),
+                       kwargs:Optional[Dict]=None):
+        """Automatically encodes and decodes heterogeneous variables to a
+        function into a Drake constraint.
+        
+        The function is assumed to be called in the form `func(v1,v2,...,vn)`,
+        unless pre_args is given, in which case it is assumed to be called
+        `func(pre_args_1,...,pre_args_m,v1,v2,...,vn)`.
+
+        This will handle all of the stacking and unstacking of the variables.
+        """
+        flat_func,flat_vars = self.wrap(func,vars,pre_args,post_args,kwargs)
+        c = self.prog.AddConstraint(flat_func,lb,ub,flat_vars)
+        if description:
+            c.evaluator().set_description(description)
+    
+    def add_cost(self,func:Callable,vars:list,
+                    description:Optional[str]=None,
+                    pre_args:Tuple=(),
+                    post_args:Tuple=(),
+                    kwargs:Optional[Dict]=None):
+        """Automatically encodes and decodes heterogeneous variables to a
+        function into a Drake cpst.
+        
+        The function is assumed to be called in the form `func(v1,v2,...,vn)`,
+        unless pre_args is given, in which case it is assumed to be called
+        `func(pre_args_1,...,pre_args_m,v1,v2,...,vn)`.
+
+        This will handle all of the stacking and unstacking of the variables.
+        """
+        flat_func,flat_vars = self.wrap(func,vars,pre_args,post_args,kwargs)
+        c = self.prog.AddCost(flat_func,flat_vars)
+        if description:
+            c.evaluator().set_description(description)
 
     def setup_program(self):
         prog = MathematicalProgram()
+        self.prog = prog
         x = prog.NewContinuousVariables(rows=self.N, cols=3, name='x')
         q = prog.NewContinuousVariables(rows=self.N, cols=4, name='q')
 
@@ -840,11 +941,12 @@ class MPCC(object):
         for i in range(self.N):
             prog.AddConstraint(lambda x: [x@x], [1], [1], q[i]).evaluator().set_description(f"q[{i}] unit quaternion constraint")
         for i in range(1, self.N):
-            prog.AddConstraint(lambda q_qprev_v, dt=self.problem.time_step : self.backward_euler_q(*(np.split(q_qprev_v,[4,4]) + [dt])),lb=[0.0]*4, ub=[0.0]*4,vars=np.concat([q[i], q[i-1], w[i]])).evaluator().set_description(f"q[{i}] backward euler constraint")
-            prog.AddConstraint(lambda x_xprev_v, dt=self.problem.time_step : self.backward_euler_x(*(np.split(x_xprev_v,[3,6]) + [dt])),lb=[0.0]*3, ub=[0.0]*3,vars=np.concat([x[i], x[i-1], v[i]])).evaluator().set_description(f"x[{i}] backward euler constraint")
-
+            self.add_constraint(self.backward_euler_q,[0.0]*4,[0.0]*4,[q[i], q[i-1], w[i]],f"q[{i}] backward euler constraint",kwargs={'dt':self.problem.time_step})
+            self.add_constraint(self.backward_euler_x,[0.0]*3,[0.0]*3,[x[i], x[i-1], v[i]],f"x[{i}] backward euler constraint",kwargs={'dt':self.problem.time_step})            
+            #prog.AddConstraint(lambda q_qprev_v, dt=self.problem.time_step : self.backward_euler_q(*(np.split(q_qprev_v,[4,8]) + [dt])),lb=[0.0]*4, ub=[0.0]*4,vars=np.concatenate([q[i], q[i-1], w[i]])).evaluator().set_description(f"q[{i}] backward euler constraint")
+            #prog.AddConstraint(lambda x_xprev_v, dt=self.problem.time_step : self.backward_euler_x(*(np.split(x_xprev_v,[3,6]) + [dt])),lb=[0.0]*3, ub=[0.0]*3,vars=np.concatenate([x[i], x[i-1], v[i]])).evaluator().set_description(f"x[{i}] backward euler constraint")
+            
         for i in range(self.N):
-
             # Bounds on variables
             prog.AddBoundingBoxConstraint(self.problem.x_bound[0],self.problem.x_bound[1],x[i])
             prog.AddBoundingBoxConstraint(self.problem.v_bound[0],self.problem.v_bound[1],v[i]) 
@@ -856,40 +958,46 @@ class MPCC(object):
             for j,point in enumerate(self.iterate.states[i].index_set):
 
                 # Non-penetration constraint
-                prog.AddConstraint(lambda qxd:self.point_distance_constraint(point,*np.split(qxd, [4, 4+3])),lb=[0.],ub=[0.],vars=np.concat([q[i],x[i],d_vars[i][j]])).evaluator().set_description(f"Non-penetration for {j}-th point at {i}-th time step")
+                self.add_constraint(self.point_distance_constraint,pre_args=(point,),lb=[0.],ub=[0.],vars=[q[i],x[i],d_vars[i][j]],description=f"Non-penetration for {j}-th point at {i}-th time step")
+                #prog.AddConstraint(lambda qxd:self.point_distance_constraint(point,*np.split(qxd, [4, 4+3])),lb=[0.],ub=[0.],vars=np.concatenate([q[i],x[i],[d_vars[i][j]]])).evaluator().set_description(f"Non-penetration for {j}-th point at {i}-th time step")
                 prog.AddBoundingBoxConstraint(0,np.inf,d_vars[i][j]).evaluator().set_description(f"Dummy non-penetration for {j}-th point at {i}-th time step")
                 
                 # Bounds on environment contact forces
-                prog.AddBoundingBoxConstraint(0,self.problem.fenv_max,force_vars['fenv_'+str(i)][j][0])
-                for k in range(1,self.friction_dim+1):
-                    prog.AddBoundingBoxConstraint(0,np.inf,force_vars['fmnp_'+str(i)][j][k]).evaluator().set_description(f"Bound for {j}-th mnp point at {i}-th time step")
+                lb = [0]*(self.friction_dim+1)
+                ub = [self.problem.fenv_max]+[np.inf]*self.friction_dim
+                prog.AddBoundingBoxConstraint(lb,ub,force_vars['fenv_'+str(i)][j]).evaluator().set_description(f"Bound for {j}-th point at {i}-th time step")
 
                 # Complementarity constraint on environment contacts
                 prog.AddConstraint(lambda z: [z[0]*z[1]],lb=[-np.inf],ub=[self.param.comp_threshold],vars=[force_vars['fenv_'+str(i)][j][0],d_vars[i][j]]).evaluator().set_description(f"CC for {j}-th point at {i}-th time step")
-
+                
                 # Friction cone constraint on envionment contacts
                 prog.AddConstraint(partial(self.friction_cone_constraint,self.problem.mu_env),lb=[0],ub=[np.inf],vars=force_vars['fenv_'+str(i)][j]).evaluator().set_description(f"Friction cone constraint for {j}-th env point at {i}-th time step")
-
+                
             # Complementarity on velocity
             if self.param.velocity_complementarity:
                 for j,point in enumerate(self.iterate.states[i].index_set): 
-                    for k in range(self.friction_dim):
-                        prog.AddConstraint(partial(self.velocity_cc_constraint,point,k),lb=[-np.inf,0.],ub=[self.param.comp_threshold,np.inf],vars=np.concatenate([q[i],w[i],x[i],v[i],gamma_vars[i][j],[force_vars['fenv_'+str(i)][j][k+1]]])).evaluator().set_description(f"Velocity CC constraint for {j}-th point dim-{k} at time step {i}.")
-                    prog.AddConstraint(lambda fdummy:self.dummy_friction_residual_constraint(self.problem.mu_env,np.split(fdummy,[self.friction_dim+1])),lb=[0.],ub=[0.],vars=np.concat([force_vars['fenv_'+str(i)][j],dummy_vars[i][j]]))
+                    #k complementarity constraints and one positivity constraint
+                    lb = [-np.inf]*self.friction_dim+[0.]*self.friction_dim
+                    ub = [self.param.comp_threshold]*self.friction_dim+[np.inf]*self.friction_dim
+                    self.add_constraint(self.velocity_cc_constraint,lb=lb,ub=ub,pre_args=(point,),vars=[q[i],w[i],x[i],v[i],gamma_vars[i][j],force_vars['fenv_'+str(i)][j]],description=f"Velocity CC constraint for {j}-th point at time step {i}.")
+                    #prog.AddConstraint(partial(self.velocity_cc_constraint,point,k),lb=[-np.inf,0.],ub=[self.param.comp_threshold,np.inf],vars=np.concatenate([q[i],w[i],x[i],v[i],[gamma_vars[i][j]],[force_vars['fenv_'+str(i)][j][k+1]]])).evaluator().set_description(f"Velocity CC constraint for {j}-th point dim-{k} at time step {i}.")
+                    self.add_constraint(self.dummy_friction_residual_constraint,lb=[0.],ub=[0.],pre_args=(self.problem.mu_env,),vars=[force_vars['fenv_'+str(i)][j],dummy_vars[i][j]],description=f"Gamma constraint for {j}-th point at {i}-th time step")
+                    #prog.AddConstraint(lambda fdummy:self.dummy_friction_residual_constraint(self.problem.mu_env,*np.split(fdummy,[self.friction_dim+1])),lb=[0.],ub=[0.],vars=np.concatenate([force_vars['fenv_'+str(i)][j],[dummy_vars[i][j]]]))
                     prog.AddConstraint(lambda z: [z[0]*z[1]],lb=[-np.inf],ub=[self.param.comp_threshold],vars=[dummy_vars[i][j],gamma_vars[i][j]])
                     prog.AddBoundingBoxConstraint(0,np.inf,gamma_vars[i][j]).evaluator().set_description(f"Gamma constraint for {j}-th point at {i}-th time step")
 
             # Constraints on manipulation contacts
             for j in range(len(self.problem.manipulation_contact_points)):
                 # Bounds on manipulation contact forces
-                prog.AddBoundingBoxConstraint(0,self.problem.fmnp_max,force_vars['fmnp_'+str(i)][j][0])
-                for k in range(1,self.friction_dim+1):
-                    prog.AddBoundingBoxConstraint(0,np.inf,force_vars['fmnp_'+str(i)][j][k]).evaluator().set_description(f"Bound for {j}-th mnp point at {i}-th time step")
+                lb = [0]*(self.friction_dim+1)
+                ub = [self.problem.fmnp_max]+[np.inf]*self.friction_dim
+                prog.AddBoundingBoxConstraint(lb,ub,force_vars['fmnp_'+str(i)][j]).evaluator().set_description(f"Bound for {j}-th mnp point at {i}-th time step")
 
                 # Friction cone constraint on manipulation contacts
-                prog.AddConstraint(partial(self.friction_cone_constraint,self.problem.mu_mnp),lb=[0],ub=[np.inf],vars=force_vars['fmnp_'+str(i)][j]).evaluator().set_description(f"Friction cone constraint for {j}-th mnp point at {i}-th time step")
-
-                # Forece on and off
+                self.add_constraint(self.friction_cone_constraint,pre_args=(self.problem.mu_mnp,),lb=[0],ub=[np.inf],vars=force_vars['fmnp_'+str(i)][j],description=f"Friction cone constraint for {j}-th mnp point at {i}-th time step")
+                #prog.AddConstraint(partial(self.friction_cone_constraint,self.problem.mu_mnp),lb=[0],ub=[np.inf],vars=force_vars['fmnp_'+str(i)][j]).evaluator().set_description(f"Friction cone constraint for {j}-th mnp point at {i}-th time step")
+                
+                # Force on and off
                 if self.param.force_on_off:
                     if self.param.use_alpha:
                         prog.AddConstraint(lambda qxfa:self.force_on_off(self.problem.manipulation_contact_points[j],*np.split(qxfa,[4, 4+3, 7+1])),lb=[4e-2,0],ub=[np.inf,0],vars=np.concatenate([q[i],x[i],[force_vars['fmnp_'+str(i)][j][0]],alpha_vars[i][j]])).evaluator().set_description(f"Force on_off for {j}-th point at {i}-th time step")    
@@ -897,21 +1005,28 @@ class MPCC(object):
                         prog.AddConstraint(lambda qxf:self.force_on_off(self.problem.manipulation_contact_points[j],np.split(qxf,[4,4+3])),lb=[0.],ub=[self.param.comp_threshold],vars=np.concatenate([q[i],x[i],[force_vars['fmnp_'+str(i)][j][0]]])).evaluator().set_description(f"Force on_off for {j}-th point at {i}-th time step")
                                 
             # Balance constraints
-            prog.AddConstraint(lambda qxvf:self.force_balance_constraint(i,np.split(qxvf,[4,3,3])),lb=[0.,0.,0.],ub=[0.,0.,0.],vars=np.concatenate([q[i],x[i],v[i]]+[force_vars['fenv_'+str(i)][j] for j in range(len(self.iterate.states[i].index_set))]+[force_vars['fmnp_'+str(i)][j] for j in range(len(self.problem.manipulation_contact_points))])).evaluator().set_description(f"Force balance at {i}-th time step")
-            prog.AddConstraint(lambda qxwf:self.torque_balance_constraint(i,np.split(qxwf,[4,3,3])),lb=[0.,0.,0.],ub=[0.,0.,0.],vars=np.concatenate([q[i],x[i],w[i]]+[force_vars['fenv_'+str(i)][j] for j in range(len(self.iterate.states[i].index_set))]+[force_vars['fmnp_'+str(i)][j] for j in range(len(self.problem.manipulation_contact_points))])).evaluator().set_description(f"Torque balance at {i}-th time step")
-
+            #fvecs = [force_vars['fenv_'+str(i)][j] for j in range(len(self.iterate.states[i].index_set))]+[force_vars['fmnp_'+str(i)][j] for j in range(len(self.problem.manipulation_contact_points))]
+            self.add_constraint(self.force_balance_constraint,lb=[0.,0.,0.],ub=[0.,0.,0.],pre_args=(i,),vars=[q[i],x[i],v[i],force_vars['fenv_'+str(i)],force_vars['fmnp_'+str(i)]],description=f"Force balance at {i}-th time step")
+            self.add_constraint(self.torque_balance_constraint,lb=[0.,0.,0.],ub=[0.,0.,0.],pre_args=(i,),vars=[q[i],x[i],w[i],force_vars['fenv_'+str(i)],force_vars['fmnp_'+str(i)]],description=f"Torque balance at {i}-th time step")
+            #prog.AddConstraint(lambda qxvf,i=i:self.force_balance_constraint(i,*np.split(qxvf,[4,4+3,7+3,10+(self.friction_dim+1)*len(self.iterate.states[i].index_set)])),lb=[0.,0.,0.],ub=[0.,0.,0.],vars=np.concatenate([q[i],x[i],v[i]]+fvecs)).evaluator().set_description(f"Force balance at {i}-th time step")
+            #prog.AddConstraint(lambda qxwf,i=i:self.torque_balance_constraint(i,*np.split(qxwf,[4,4+3,7+3,10+(self.friction_dim+1)*len(self.iterate.states[i].index_set)])),lb=[0.,0.,0.],ub=[0.,0.,0.],vars=np.concatenate([q[i],x[i],w[i]]+fvecs)).evaluator().set_description(f"Torque balance at {i}-th time step")
+        
         # Boundary constraints
-        initial_pose_relaxation = self.param.initial_pose_relaxation
-        goal_pose_relaxation = self.param.goal_pose_relaxation
+        initial_pose_relaxation = self.problem.initial_pose_relaxation
+        goal_pose_relaxation = self.problem.goal_pose_relaxation
+        q_init = so3.quaternion(self.problem.T_init[0])
+        x_init = self.problem.T_init[1]
+        q_goal = so3.quaternion(self.problem.T_goal[0])
+        x_goal = self.problem.T_goal[1]
         for i in range(4):
-            prog.AddBoundingBoxConstraint(self.q_init[i]-initial_pose_relaxation, self.q_init[i]+initial_pose_relaxation, q[0][i]).evaluator().set_description(f"Initial orientation constraint {i}")
-            prog.AddBoundingBoxConstraint(self.q_goal[i]-goal_pose_relaxation, self.q_goal[i]+goal_pose_relaxation, q[-1][i]).evaluator().set_description(f"Goal orientation constraint {i}")
+            prog.AddBoundingBoxConstraint(q_init[i]-initial_pose_relaxation, q_init[i]+initial_pose_relaxation, q[0][i]).evaluator().set_description(f"Initial orientation constraint {i}")
+            prog.AddBoundingBoxConstraint(q_goal[i]-goal_pose_relaxation, q_goal[i]+goal_pose_relaxation, q[-1][i]).evaluator().set_description(f"Goal orientation constraint {i}")
         for i in range(3):
-            prog.AddBoundingBoxConstraint(self.x_init[i]-initial_pose_relaxation, self.x_init[i]+initial_pose_relaxation, x[0][i]).evaluator().set_description(f"Initial position constraint {i}")
-            prog.AddBoundingBoxConstraint(self.x_goal[i]-goal_pose_relaxation, self.x_goal[i]+goal_pose_relaxation, x[-1][i]).evaluator().set_description(f"Goal position constraint {i}")
+            prog.AddBoundingBoxConstraint(x_init[i]-initial_pose_relaxation, x_init[i]+initial_pose_relaxation, x[0][i]).evaluator().set_description(f"Initial position constraint {i}")
+            prog.AddBoundingBoxConstraint(x_goal[i]-goal_pose_relaxation, x_goal[i]+goal_pose_relaxation, x[-1][i]).evaluator().set_description(f"Goal position constraint {i}")
 
         # Objective function
-        prog.AddCost(self.cost_fun,vars=np.array([q[i] for i in range(self.N)]+[x[i] for i in range(self.N)]))
+        self.add_cost(self.cost_fun,vars=[q,x])
         
         # Set up initial guess for the optimization
         for i in range(self.N):
@@ -932,7 +1047,6 @@ class MPCC(object):
                     prog.SetInitialGuess(gamma_vars[i][j], self.iterate.states[i].gamma[j])
                     prog.SetInitialGuess(dummy_vars[i][j], self.iterate.states[i].dummy[j])
 
-        self.prog = prog
         self.q = q
         self.x = x
         self.w = w
@@ -1001,27 +1115,32 @@ if __name__ == '__main__':
 
     # Import the module dynamically
     module = importlib.import_module(module_name)
-    importlib.reload(module)
+    #importlib.reload(module)
     # Access the 'problem' and 'params' attribute from the imported module
     problem = getattr(module, 'problem', None)
     params = getattr(module, 'params', None)
 
-    if problem is None or not isinstance(problem, Problem):
-        print(f"The 'problem' attribute was not found in the module {module_name} or is not a Problem instance")
-    elif params is None or not isinstance(params, OptimizerParams):
-        print(f"The 'params' attribute was not found in the module {module_name} or is not a OptimizerParams instance")
+    if problem is None:
+        print(f"The 'problem' attribute was not found in the module {module_name}")
+        exit(1)
+    elif params is None:
+        print(f"The 'params' attribute was not found in the module {module_name}")
+        exit(1)
     else:
         print(f"Successfully imported 'params' from {module_name}")
         print(f"Environment: {environment}")
         print(f"Manipuland: {manipuland}")
         print(f"Number of time steps: {problem.N}")
         print(f"Time step: {problem.time_step}")
-        if parser.debug:
+        if args.debug:
             print(f"Debug mode is on")
+            problem.init_sdf_cache(debug=True)
             from visualization import plot_problem_klampt
             plot_problem_klampt(problem)
 
-    stocs_3d = STOCS(params)
+    problem.manipuland_name = manipuland
+    problem.environment_name = environment
+    stocs_3d = STOCS(problem,params)
 
     res = stocs_3d.solve()
     print(f"Time used: {res.time}s.")
