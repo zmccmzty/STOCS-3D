@@ -226,7 +226,7 @@ class ConstraintGenerationData:
                     dtest = c.value(x,newparam)
                     if abs(dtest-dmin) > 1e-4:
                         print("Strange, the %s.value function differs from %s.minvalue: %g vs %g"%(c.__class__.__name__,c.__class__.__name__,dtest,dmin)
-                        raw_input("Press enter to continue > ")
+                        input("Press enter to continue > ")
                 """
 
                 if method.endswith('all'):
@@ -239,6 +239,8 @@ class ConstraintGenerationData:
                         dlist.append((dmin,i,newparam))
             elif method == 'all':
                 if len(self.instantiated_params[i]) == 0:
+                    raise NotImplementedError("TODO: Can't do 'all' oracle yet")
+                
                     Y = c.domain()
                     if isinstance(Y,(list,tuple)):
                         elements = [domainExtrema(Yi) for Yi in Y]
@@ -256,7 +258,8 @@ class ConstraintGenerationData:
                 nsamples = 1
                 if method != 'random':
                     nsamples = int(method[7:])
-                for k in xrange(nsamples):
+                raise NotImplementedError("TODO: Can't do 'random' method yet")
+                for k in range(nsamples):
                     if isinstance(Y,(list,tuple)):
                         elements = [sampleDomain(Yi) for Yi in Y]
                         newparam = flatten(elements)
@@ -372,7 +375,7 @@ class ConstraintGenerationData:
                 print("   Result.pri_res",results.info.pri_res)
                 print("   Result.dua_res",results.info.dua_res)
                 print("   Predicted constraint violations after QP solve:",residual)
-                raw_input()
+                input()
             """
         x = results.x
         return results.x[:len(xdes)]
@@ -391,7 +394,7 @@ class ConstraintGenerationData:
         b = np.asarray(b)
         dpred = np.dot(A,xdes) + b
         inside = []
-        for i in xrange(len(b)):
+        for i in range(len(b)):
             if dpred[i] <= 0 or b[i] < 0:
                 inside.append(i)
         if xmin is not None:
@@ -399,7 +402,7 @@ class ConstraintGenerationData:
             k = len(b)
             Afull = [A]
             bfull = [b]
-            for i in xrange(n):
+            for i in range(n):
                 Afull.append([0.0]*n)
                 Afull[-1][i] = 1
                 bfull.append(-xmin[i])
@@ -449,13 +452,13 @@ class ConstraintGenerationData:
                 assert len(W) == Aactive.shape[1]
                 #scale by 1/(wi + regularizationFactor)
                 scaling = np.zeros(len(W))
-                for i in xrange(len(W)):
+                for i in range(len(W)):
                     scaling[i] = 1.0/math.sqrt(W[i] + regularizationFactor)
                     Aactive[:,i] *= scaling[i]
             else:
                 #a matrix
                 H = W[:,:]
-                for i in xrange(H.shape[0]):
+                for i in range(H.shape[0]):
                     H[i,i] += regularizationFactor
                 L = np.linalg.cholesky(H)
                 Linv = scipy.linalg.solve_triangular(L,np.eye(H.shape[0]),lower=True)
@@ -526,7 +529,7 @@ def optimizeStandard(objective,constraints,xinit,xmin=None,xmax=None,settings=No
                     print("WARNING: initial constraint value %d is below the minimum %g < %g"%(i,res.gx0[i],settings.minimum_constraint_value))
                     minimum_constraint_value = res.gx0[i]
                     if verbose >= 1:
-                        raw_input("Press enter to continue > ")
+                        input("Press enter to continue > ")
             df_dT = c.df_dx(x)
             c.clearx()
             depths.append(res.gx[i])
@@ -550,7 +553,7 @@ def optimizeStandard(objective,constraints,xinit,xmin=None,xmax=None,settings=No
                         f = c.value(x)
                         c.clearx()
                         print("t =",0.01*j,":",f)
-                raw_input()
+                input()
             anywrong = False
             for i,c in enumerate(constraints):
                 def f(v):
@@ -562,7 +565,7 @@ def optimizeStandard(objective,constraints,xinit,xmin=None,xmax=None,settings=No
                     return retval
                 anywrong = anywrong or utils.test_gradient(f,df,x,name="constraint %d %s"%(i,c.__class__.__name__))
             if anywrong:
-                raw_input("Press enter to continue...")
+                input("Press enter to continue...")
 
         #print("depth:",flatdepths,"predicted:",offsets,"with",len(inside),"in collision")
         if xmin is None:
@@ -706,7 +709,7 @@ def optimizeStandard(objective,constraints,xinit,xmin=None,xmax=None,settings=No
                         dvals = [c(xnext) for c in constraints]
                         fx = objective.value(xnext)
                         print("  alpha",alpha,"f(x)",fx,"pred",min(dpred),"actual",min(sum(dvals,[])),"score",fx*objScoreWeight + scoring_metric([d for d in dvals if d < 0]))
-                    raw_input("Press enter to continue > ")
+                    input("Press enter to continue > ")
             if np.min(gxnew) < minimum_constraint_value:
                 reject_reason = 'under minimum constraint value'
             if not accept_step:
@@ -738,7 +741,7 @@ def optimizeStandard(objective,constraints,xinit,xmin=None,xmax=None,settings=No
         objScoreWeight *= scale
         if objScoreWeight < settings.minimum_objective_score_weight:
             objScoreWeight = settings.minimum_objective_score_weight
-        #if verbose>=2: raw_input()
+        #if verbose>=2: input()
 
 
     tfinish = time.time()
@@ -762,6 +765,7 @@ def optimizeStandard(objective,constraints,xinit,xmin=None,xmax=None,settings=No
 
 def optimizeKlampt(objective,constraints,xinit,xmin=None,xmax=None,settings=None,verbose=1):
     """ Uses the Klamp't optimize solver to solve an NLP.  (Not used.)"""
+    raise NotImplementedError("Klamp't optimization not yet supported")
     tstart = time.time()
     p = optimize.OptimizationProblem()
     def df(x):
@@ -880,7 +884,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                     print("WARNING: initial constraint value %d is below the minimum %g < %g"%(i,res.gx0[i],settings.minimum_constraint_value))
                     minimum_constraint_value = res.gx0[i]
                     if verbose >= 1:
-                        raw_input("Press enter to continue > ")
+                        input("Press enter to continue > ")
             if INCLUDED_CONSTRAINT_PARAMETERS == 'deepest':
                 if len(cdepths[i]) > 0:
                     (d,y) = min(zip(cdepths[i],cdata.instantiated_params[i]))
@@ -917,7 +921,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                             f = c.value(x,y)
                             c.clearx()
                             print("t =",0.01*j,":",f)
-                raw_input()
+                input()
             anywrong = False
             for i,c in enumerate(constraints):
                 for y in cdata.instantiated_params[i]:
@@ -930,7 +934,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                         return retval
                     anywrong = anywrong or utils.test_gradient(f,df,x,name="constraint %d %s"%(i,c.__class__.__name__))
             if anywrong:
-                raw_input("Press enter to continue...")
+                input("Press enter to continue...")
 
         #print("depth:",flatdepths,"predicted:",offsets,"with",len(inside),"in collision")
         if xmin is None:
@@ -976,7 +980,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                         if np.linalg.norm(np.asarray(retval)-rows[k]) > 1e-4:
                             print("     DISCREPANCY IN DERIVATIVE",retval,"vs",rows[k])
                     k += 1
-            raw_input()
+            input()
         dxnorm2 = np.dot(dx,dx)
         if dxnorm2 < xepsilon2:
             if verbose>=2: print("Solved")
@@ -1032,7 +1036,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
             """
             #limit by extrapolations of other points
             if len(inside) < len(cdata.instantiated_params):
-                for i in xrange(len(rows)):
+                for i in range(len(rows)):
                     if depths[i] > 0:
                         dpred = alpha*np.dot(rows[i],dx) + depths[i]
                         if dpred < 0:
@@ -1087,7 +1091,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                                         c.clearx()
                                         print("  old constraint values",cvalues)
                                         print("  new constraint values",newcvalues)
-                                raw_input()
+                                input()
                             update_oracle = False
                             break
                     """
@@ -1113,7 +1117,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                                         c.clearx()
                                         print("  old constraint values",cvalues)
                                         print("  new constraint values",newcvalues)
-                                raw_input()
+                                input()
                             update_oracle = False
                     #decrease in score
                     if verbose>=1:
@@ -1136,7 +1140,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                             c.clearx()
                         fx = objective.value(xnext)
                         print("  alpha",alpha,"f(x)",fx,"pred",min(dpred),"actual",min(sum(dvals,[])),"score",_score(fx,dvals,objScoreWeight))
-                    raw_input("Press enter to continue > ")
+                    input("Press enter to continue > ")
                 if objScoreWeight < xepsilon*10:
                     break
                 xnext = x
@@ -1174,7 +1178,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
                             c.clearx()
                         fx = objective.value(xnext)
                         print("  alpha",alpha,"f(x)",fx,"pred",min(dpred),"actual",min(sum(dvals,[])),"score",_score(fx,dvals,objScoreWeight))
-                    raw_input("Press enter to continue > ")
+                    input("Press enter to continue > ")
             if np.min(gxnew) < minimum_constraint_value:
                 reject_reason = 'under minimum constraint value'
             if DETECT_NEW_COLLISIONS_IN_STEP:
@@ -1213,7 +1217,7 @@ def optimizeSemiInfinite(objective,constraints,xinit,xmin=None,xmax=None,setting
         objScoreWeight *= scale
         if objScoreWeight < settings.minimum_objective_score_weight:
             objScoreWeight = settings.minimum_objective_score_weight
-        #if verbose>=2: raw_input()
+        #if verbose>=2: input()
 
 
     tfinish = time.time()

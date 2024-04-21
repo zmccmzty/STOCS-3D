@@ -5,7 +5,7 @@ def numeric_gradient(f,x,h=1e-4,method='centered'):
     xtest = np.array(x)
     g = np.zeros(len(x))
     if method == 'centered':
-        for i in xrange(len(x)):
+        for i in range(len(x)):
             xtest[i] += h
             b = f(xtest)
             xtest[i] -= 2*h
@@ -17,7 +17,7 @@ def numeric_gradient(f,x,h=1e-4,method='centered'):
         return g
     elif method == 'forward':
         a = f(x)
-        for i in xrange(len(x)):
+        for i in range(len(x)):
             xtest[i] += h
             b = f(xtest)
 
@@ -26,7 +26,7 @@ def numeric_gradient(f,x,h=1e-4,method='centered'):
         return g
     elif method == 'backward':
         a = f(x)
-        for i in xrange(len(x)):
+        for i in range(len(x)):
             xtest[i] -= h
             b = f(xtest)
 
