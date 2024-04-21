@@ -1,15 +1,11 @@
 import numpy as np
-import sys
 import time
 import copy
 import math
 from functools import partial
 from klampt.math import vectorops,so3,se3
 from MPCC import MPCC
-import trimesh
-import open3d as o3d
 import os
-from klampt import vis
 from semiinfinite.geometryopt import *
 import threading
 from utils import *
@@ -182,6 +178,7 @@ class STOCS(object):
         return index_set
 
     def plot_index_points(self,q,x):
+        import open3d as o3d
         xyz = np.zeros((len(self.active_index_set[0]),3))
         for i,index_pt in enumerate(self.active_index_set[0]):
             xyz[i,:] = index_pt
