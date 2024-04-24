@@ -81,11 +81,9 @@ def plot_problem_klampt(problem : Problem, show=True):
     manipulator_0.appearance().setColor(1,0,0,1.0)
     manipulator_0.appearance().setSilhouette(0.001)
     
-    
+    vis.add("world",world)
     if show:
-        vis.add("world",world)
         vis.run()
-        vis
 
 def plot_trajectory_klampt(traj : TrajectoryState, problem : Problem, show=True):
     import klampt
@@ -101,7 +99,7 @@ def plot_trajectory_klampt(traj : TrajectoryState, problem : Problem, show=True)
         Ti = traj.states[i].pose()
         Ti = (Ti[0],vectorops.add(Ti[1],[plot_shift*i,0,0]))
 
-        obj_i.setTransform(Ti)
+        obj_i.setTransform(*Ti)
         obj_i.appearance().setColor(0,0.1*i,1,0.2)
         obj_i.appearance().setSilhouette(0.001)
 
@@ -129,7 +127,8 @@ def plot_trajectory_klampt(traj : TrajectoryState, problem : Problem, show=True)
         point_plot = [point_world[0]+plot_shift*i,point_world[1],point_world[2]]
         manipulator_i.setTransform(so3.canonical(normal_direction),point_plot)
 
+    vis.add("world",world)
     if show:
-        vis.add("world",world)
         vis.run()
         vis.kill()
+        vis.scene().clear()

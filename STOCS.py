@@ -13,7 +13,7 @@ import threading
 from utils import *
 from typing import List,Tuple,Dict,Optional,Union,Callable
 from klampt.model.typing import RigidTransform,Vector3
-from dataclasses import dataclass,replace
+from dataclasses import dataclass,replace,field
 
 @dataclass
 class Problem:
@@ -56,7 +56,14 @@ class Problem:
             if debug:
                 from klampt import vis
                 environment_mesh = self.environment_sdf_cache.geom.convert('TriangleMesh')
-                vis.debug(SDF=environment_mesh,title="Environment SDF")
+                pc = []
+                for v in environment_mesh.getTriangleMesh().getVertices():
+                    g = self.environment_sdf_cache.gradient(v)
+                    pc.append(vectorops.add(v,vectorops.mul(g,0.05)))
+                from klampt.io import numpy_convert
+                pc = numpy_convert.from_numpy(np.array(pc),'PointCloud')
+                pcg = Geometry3D(pc)
+                vis.debug(SDF=environment_mesh,outer_points=pcg,title="Environment SDF")
 
     @staticmethod
     def from_world(world : WorldModel, rigidObject=0, grid_res=0.005, pc_res=0.005) -> Problem:
@@ -132,7 +139,8 @@ class OptimizerParams:
     major_feasibility_tolerance : float = 1e-4
     major_optimality_tolerance : float = 1e-4
     velocity_complementarity: bool = True   # whether to use velocity complementarity
-    comp_threshold: float = 1e-4            # Complementarity threshold
+    comp_threshold_init: float = 1e-4       # Initial complementarity threshold
+    comp_threshold_shrink_factor : float =1 # Complementarity threshold shrinking coefficient
     friction_dim: int = 6                   # Friction cone dimension
     assumption: str = 'quasi_dynamic'       # 'quasi_static' or 'quasi_dynamic'
     use_alpha: bool = False                 # Experimental: whether to use alpha in the optimization
@@ -150,9 +158,9 @@ class TimestepState:
     fenv: List[np.ndarray]                  # environment contact forces
     fmnp: List[np.ndarray]                  # manipulation contact forces
     d: List[float]                          # index set distances
-    gamma: List[float]                      # velocity complementarity for each index point
-    dummy: List[float]                      # dummy variable for velocity complementarity
-    alpha: List[float]                      # alpha for each manipulation contact point
+    gamma: List[float]                      # velocity complementarity for each index point (optional)
+    dummy: List[float]                      # dummy variable for velocity complementarity (optional)
+    alpha: List[float]                      # alpha for each manipulation contact point (optional)
 
     def pose(self) -> RigidTransform:
         """Returns the manipuland pose as a RigidTransform"""
@@ -244,6 +252,8 @@ class Result:
         return np.mean(np.array(index_set_nums))
 
 
+
+
 class STOCS(object):
     """Uses the Simultaneous Trajectory Optimization and Contact Selection
     (STOCS) algorithm to optimize a contact-rich trajectory of a manipuland in
@@ -259,6 +269,13 @@ class STOCS(object):
         self.current_iterate = None
         #initialize environment SDF if not already initialized
         self.problem.init_sdf_cache()
+        self.callback = None  # type: Optional[Callable]
+        self.comp_threshold = None
+    
+    def set_callback(self, cb : Callable):
+        """Sets a callback that will be called every iteration with the current
+        iterate before MPCC solving."""
+        self.callback = cb
 
     def oracle(self, iterate : TrajectoryState) -> Tuple[List[List[np.ndarray]],List[List[int]]]:
         """Subclass might override me?
@@ -381,7 +398,7 @@ class STOCS(object):
                     v = np.zeros(3)
                 elif self.optimization_params.initialization == "linear":
                     T = se3.interpolate(self.problem.T_init,self.problem.T_goal,i/(self.N-1))
-                    wv = vectorops.mul(se3.error(self.problem.T_init,self.problem.T_goal),1.0/self.problem.time_step)
+                    wv = vectorops.mul(se3.error(self.problem.T_goal,self.problem.T_init),1.0/self.problem.time_step)
                     w = np.array(wv[0:3])
                     v = np.array(wv[3:6])
                 else:
@@ -397,6 +414,7 @@ class STOCS(object):
     def solve(self) -> Result:
         t_start = time.time()
         iter = 0
+        self.comp_threshold = self.optimization_params.comp_threshold_init
         if self.current_iterate is None:
             #initialize, if necessary
             self.set_initial_state()
@@ -404,6 +422,8 @@ class STOCS(object):
         stocs_res = Result(is_success=False,total_iter=0,iterates=[],final=replace(self.current_iterate))
         mpcc = MPCC(self.problem,self.optimization_params,self.current_iterate)
         print("Initial score function",self._score_function(mpcc,self.current_iterate))
+        if self.callback is not None:
+            self.callback(self.current_iterate)
         while iter < self.optimization_params.stocs_max_iter:
             #call oracle
             new_index_set, removed_index_set = self.oracle(self.current_iterate)
@@ -448,8 +468,10 @@ class STOCS(object):
 
             #TODO: THIS IS A HACK! need to make the iteration growth rate a proper parameter
             self.optimization_params.max_mpcc_iter = min(5+5*iter,100)
-            mpcc = MPCC(self.problem,self.optimization_params,self.current_iterate)
+            mpcc = MPCC(self.problem,self.optimization_params,self.current_iterate,self.comp_threshold)
             print(f"MPCC solve iteration {iter}, current state score {self._score_function(mpcc,self.current_iterate)}")
+            if self.callback is not None:
+                self.callback(self.current_iterate)
 
             def print_dots(stop_event):
                 while not stop_event.is_set():
@@ -490,48 +512,70 @@ class STOCS(object):
                 break
             
             iter += 1
+            self.comp_threshold *= self.optimization_params.comp_threshold_shrink_factor
 
+        stocs_res.iterates.append(copy.deepcopy(self.current_iterate))
+        stocs_res.final = stocs_res.iterates[-1]
+        stocs_res.total_iter = iter
         stocs_res.time = time.time()-t_start
+        if self.callback is not None:
+            self.callback(self.current_iterate)
         return stocs_res
+
+    def evaluate(self, res : TrajectoryState) -> OptimizationProblemEvaluation:
+        mpcc = MPCC(self.problem,self.optimization_params,res,self.comp_threshold)
+        res = OptimizationProblemEvaluation()
+        qtraj = [s.q for s in res.states]
+        xtraj = [s.x for s in res.states]
+        res.total_objective = mpcc.cost_fun(qtraj,xtraj)
+        k = self.optimization_params.friction_dims
+        for i,s in res.states:
+            res.variables[('q',i)] = s.q
+            res.variables[('x',i)] = s.x
+            res.variables[('v',i)] = s.v
+            res.variables[('w',i)] = s.w
+            res.variable_bounds[('x',i)] = self.problem.x_bound
+            res.variable_bounds[('v',i)] = self.problem.v_bound
+            for j in range(self.problem.manipulation_contact_points):
+                res.variables[('fmnp',i,j)] = s.fmnp[j]
+                res.variable_bounds[('fmnp',i,j)] = [np.zeros(k+1),np.array([self.problem.fmnp_max]+[np.inf]*k)]
+            for j in range(len(s.index_set)):
+                res.variables[('d',i,j)] = s.d[j]
+                res.variable_bounds[('d',i,j)] = [0,np.inf]
+                res.variables[('fenv',i,j)] = s.fenv[j]
+                res.variable_bounds[('fenv',i,j)] = [np.zeros(k+1),np.array([self.problem.fmnp_max]+[np.inf]*k)]
+                if self.optimization_params.velocity_complementarity:
+                    res.variables[('gamma',i,j)] = s.gamma[j]
+                    res.variables[('dummy',i,j)] = s.dummy[j]
+                    res.variable_bounds[('gamma',i,j)] = [0,np.inf]
+                    res.variable_bounds[('dummy',i,j)] = [0,np.inf]
+        res.regularize()
 
     def _score_function(self,mpcc : MPCC,res : TrajectoryState):
         qtraj = [s.q for s in res.states]
         xtraj = [s.x for s in res.states]
+        pens = self._index_point_penetration(res) 
+        dpens = self._deepest_penetration(res)
+        self._complimentarity_residual(mpcc,res) + self._force_balance_residual(mpcc,res) + self._torque_balance_residual(mpcc,res)\
+                np.sum(np.abs(self._unit_constraint_violation(res))) + self._boundary_constraint_violation(res) +\
+                self._integration_constraint_violation(mpcc,res)
+        
         score = mpcc.cost_fun(qtraj,xtraj) + self._constraint_violation(mpcc,res)
         return score
 
-    def _line_search(self, mpcc : MPCC,res_target : TrajectoryState, res_current : TrajectoryState):
-        current_score = self._score_function(mpcc,res_current)
-        target_score = self._score_function(mpcc,res_target)
-        res_temp = res_target
-
-        iter_ls = 0
-        step_size = 1
-        while target_score > current_score and iter_ls < self.optimization_params.max_ls_iter:
-            step_size = step_size*self.optimization_params.ls_shrink_factor
-
-            res_temp = TrajectoryState.interpolate(res_current,res_target,step_size) 
-            
-            target_score = self._score_function(mpcc,res_temp)
-
-            iter_ls += 1
-
-        return res_temp
-
     def _constraint_violation(self,mpcc : MPCC, res: TrajectoryState):
         score = self._index_point_penetration(res) + self._deepest_penetration(res) + \
-                self._complimentarity_residual(mpcc,res) + self._balance_residual(mpcc,res) +\
-                self._unit_constraint_violation(res) + self._boundary_constraint_violation(res) +\
+                self._complimentarity_residual(mpcc,res) + self._force_balance_residual(mpcc,res) + self._torque_balance_residual(mpcc,res)\
+                np.sum(np.abs(self._unit_constraint_violation(res))) + self._boundary_constraint_violation(res) +\
                 self._integration_constraint_violation(mpcc,res)
         return score
 
-    def _unit_constraint_violation(self, res : TrajectoryState):
-        violation = 0
+    def _unit_constraint_violation(self, res : TrajectoryState) -> list:
+        res = []
         for i in range(self.N):
             q = res.states[i].q
-            violation += np.abs(q@q-1)
-        
-        return violation
+            res.append(np.abs(q@q-1))
+        return res
 
     def _boundary_constraint_violation(self, res : TrajectoryState):
         violation = 0
@@ -572,57 +616,88 @@ class STOCS(object):
 
         return violation
 
-    def _index_point_penetration(self,res : TrajectoryState):
-        penetration = 0
+    def _index_point_penetration(self,res : TrajectoryState) -> list:
+        penetration = []
         for i in range(self.N):
             T = res.states[i].pose()
+            peni = []
             for point in res.states[i].index_set:
                 point_world = se3.apply(T,point)   
                 for environment in self.problem.environments:
                     dist = environment.distance(point_world)[0]
-                    penetration += abs(min(dist,0))
+                    peni.append(-dist)
+            penetration.append(peni)
         return penetration
 
-    def _deepest_penetration(self,res: TrajectoryState):
-        penetration = 0
+    def _deepest_penetration(self,res: TrajectoryState) -> list:
+        penetration = []
         for i in range(self.N):
             T = res.states[i].pose()
             self.manipuland.setTransform(T)
+            mindist = np.inf
             for environment in self.problem.environments:
                 dist_, p_obj, p_env = self.manipuland.distance(environment)
-                if dist_ < 0:
-                    penetration += abs(min(dist_,0))
-
+                mindist = min(mindist,dist_)
+            penetration.append(-mindist)
         return penetration
 
-    def _complimentarity_residual(self,mpcc : MPCC, res : TrajectoryState):
-        residual = 0
+    def _force_distance_complementarity(self,mpcc : MPCC, res : TrajectoryState):
+        results = []
         for i in range(self.N):
             s = res.states[i]
-            for j in range(len(s.index_set)):
-                # Position Comp
-                residual += abs(min(self.optimization_params.comp_threshold-s.fenv[j][0]*s.d[j],0))
-                
-                # Velocity Comp
-                if self.optimization_params.velocity_complementarity:
+            items = [s.fenv[j][0]*s.d[j] for j in range(len(s.index_set))]
+            results.append(items)
+        return results
+
+    def _velocity_complementarity(self,mpcc : MPCC, res : TrajectoryState):                
+        # Velocity Comp
+        if not self.optimization_params.velocity_complementarity:
+            return []
+        results = []
+        for i in range(self.N):
+            s = res.states[i]
+            for j in range(len(s.index_set))
                     constraint_value = mpcc.velocity_cc_constraint(res.states[i].index_set[j],s.q,s.x,s.v,s.w,s.gamma[j],s.fenv[j])
                     residual += np.sum(np.abs(np.minimum(self.optimization_params.comp_threshold - constraint_value[0:self.optimization_params.friction_dim],0)))               
                     residual += abs(min(self.optimization_params.comp_threshold - s.dummy[j]*s.gamma[j],0))
 
-        return residual
+        return results
 
-    def _balance_residual(self,mpcc : MPCC, res : TrajectoryState):
-        residual = 0
+    def _force_balance_residual(self,mpcc : MPCC, res : TrajectoryState) -> list:
+        residual = []
         for i in range(self.N):
             s = res.states[i]
-            residual += np.sum(np.abs(mpcc.force_balance_constraint(i,s.q,s.x,s.v,np.asarray(s.fenv),np.asarray(s.fmnp))))
-            residual += np.sum(np.abs(mpcc.torque_balance_constraint(i,s.q,s.x,s.w,np.asarray(s.fenv),np.asarray(s.fmnp))))
+            residual.append(mpcc.force_balance_constraint(i,s.q,s.x,s.v,np.asarray(s.fenv),np.asarray(s.fmnp)))
 
         return residual
+    
+    def _torque_balance_residual(self,mpcc : MPCC, res : TrajectoryState) -> list:
+        residual = []
+        for i in range(self.N):
+            s = res.states[i]
+            residual.append(mpcc.torque_balance_constraint(i,s.q,s.x,s.w,np.asarray(s.fenv),np.asarray(s.fmnp)))
+        return residual
+    
+    def _line_search(self, mpcc : MPCC,res_target : TrajectoryState, res_current : TrajectoryState):
+        current_score = self._score_function(mpcc,res_current)
+        target_score = self._score_function(mpcc,res_target)
+        res_temp = res_target
 
+        iter_ls = 0
+        step_size = 1
+        while target_score > current_score and iter_ls < self.optimization_params.max_ls_iter:
+            step_size = step_size*self.optimization_params.ls_shrink_factor
+
+            res_temp = TrajectoryState.interpolate(res_current,res_target,step_size) 
+            
+            target_score = self._score_function(mpcc,res_temp)
+
+            iter_ls += 1
+
+        return res_temp
 
 class MPCC(object):
-    def __init__(self,problem: Problem, param : OptimizerParams, iterate: TrajectoryState):
+    def __init__(self,problem: Problem, param : OptimizerParams, iterate: TrajectoryState, comp_threshold : float = None):
 
         self.problem = problem
         self.param = param
@@ -631,6 +706,10 @@ class MPCC(object):
         # Optimization parameters
         self.N = self.problem.N 
         self.friction_dim = self.param.friction_dim
+        if comp_threshold is None:
+            self.comp_threshold = param.comp_threshold_init
+        else:
+            self.comp_threshold = comp_threshold
         self.prog = None
 
         assert problem.environment_sdf_cache is not None, "Environment SDF cache is not initialized."
@@ -786,7 +865,7 @@ class MPCC(object):
         tangential directions.
 
         Returns k*2 elements.  The first k elements are the complementarity
-        conditions on tangential velocities and forces, v_t[j]*f_t[j] <= 0,
+        conditions on tangential velocities and forces, (gamma + v_t[j])*f_t[j] <= 0,
         and the last k elements set conditions on gamma, gamma + v_t[j] >= 0 
 
         These are coupled with the dummy variable complementarity conditions        
@@ -797,8 +876,17 @@ class MPCC(object):
         When friction is not at the limit, dummy > 0, and gamma = 0.  This means that both v and gamma
         have to be 0 as desired.
                 
-        At friction cone limit, we have dummy = 0, which lets v and f be anything that
-        gives gamma a way to satisfy bounds given by these constraints.
+        At friction cone limit, we have dummy = 0, which lets gamma be nonzero
+        and now v and f must "work together with" gamma a way to satisfy bounds
+        given by these constraints.  
+
+        Note that there are options for the complementarity condition.  Method 1
+        is (gamma + v_t[j])*f_t[j] <= 0, which
+        makes sure that in almost all cases, exactly one friction cone boundary
+        edge is active and gamma is the negative velocity along this boundary
+        Method 2 is v_t[j]*f_t[j] <= 0, which may lead to less apparent
+        friction due to forces being in the interior of the friction cone. 
+        TODO: make this a configuration parameter.
 
         """
         R = so3.from_quaternion(q)
@@ -816,8 +904,10 @@ class MPCC(object):
         for j in range(self.friction_dim):
             phi = (2*math.pi/int(self.friction_dim))*j
             T_friction = so3.apply(N_frame,(0,math.cos(phi),math.sin(phi)))
-            #res1.append(gamma + vectorops.dot(v_tangential,T_friction)*f[j+1])
-            res1.append(vectorops.dot(v_tangential,T_friction)*f[j+1])
+            # method 1
+            res1.append(gamma + vectorops.dot(v_tangential,T_friction)*f[j+1])
+            # method 2
+            #res1.append(vectorops.dot(v_tangential,T_friction)*f[j+1])
             res2.append(gamma + vectorops.dot(v_tangential,T_friction))
         return np.array(res1+res2)
 
@@ -987,7 +1077,7 @@ class MPCC(object):
                 prog.AddBoundingBoxConstraint(lb,ub,force_vars['fenv_'+str(i)][j]).evaluator().set_description(f"Bound for {j}-th point at {i}-th time step")
 
                 # Complementarity constraint on environment contacts
-                prog.AddConstraint(lambda z: [z[0]*z[1]],lb=[-np.inf],ub=[self.param.comp_threshold],vars=[force_vars['fenv_'+str(i)][j][0],d_vars[i][j]]).evaluator().set_description(f"CC for {j}-th point at {i}-th time step")
+                prog.AddConstraint(lambda z: [z[0]*z[1]],lb=[-np.inf],ub=[self.comp_threshold],vars=[force_vars['fenv_'+str(i)][j][0],d_vars[i][j]]).evaluator().set_description(f"CC for {j}-th point at {i}-th time step")
                 
                 # Friction cone constraint on envionment contacts
                 prog.AddConstraint(partial(self.friction_cone_constraint,self.problem.mu_env),lb=[0],ub=[np.inf],vars=force_vars['fenv_'+str(i)][j]).evaluator().set_description(f"Friction cone constraint for {j}-th env point at {i}-th time step")
@@ -997,12 +1087,12 @@ class MPCC(object):
                 for j,point in enumerate(self.iterate.states[i].index_set): 
                     #k complementarity constraints and one positivity constraint
                     lb = [-np.inf]*self.friction_dim+[0.]*self.friction_dim
-                    ub = [self.param.comp_threshold]*self.friction_dim+[np.inf]*self.friction_dim
+                    ub = [self.comp_threshold]*self.friction_dim+[np.inf]*self.friction_dim
                     self.add_constraint(self.velocity_cc_constraint,lb=lb,ub=ub,pre_args=(point,),vars=[q[i],w[i],x[i],v[i],gamma_vars[i][j],force_vars['fenv_'+str(i)][j]],description=f"Velocity CC constraint for {j}-th point at time step {i}.")
-                    #prog.AddConstraint(partial(self.velocity_cc_constraint,point,k),lb=[-np.inf,0.],ub=[self.param.comp_threshold,np.inf],vars=np.concatenate([q[i],w[i],x[i],v[i],[gamma_vars[i][j]],[force_vars['fenv_'+str(i)][j][k+1]]])).evaluator().set_description(f"Velocity CC constraint for {j}-th point dim-{k} at time step {i}.")
+                    #prog.AddConstraint(partial(self.velocity_cc_constraint,point,k),lb=[-np.inf,0.],ub=[self.comp_threshold,np.inf],vars=np.concatenate([q[i],w[i],x[i],v[i],[gamma_vars[i][j]],[force_vars['fenv_'+str(i)][j][k+1]]])).evaluator().set_description(f"Velocity CC constraint for {j}-th point dim-{k} at time step {i}.")
                     self.add_constraint(self.dummy_friction_residual_constraint,lb=[0.],ub=[0.],pre_args=(self.problem.mu_env,),vars=[force_vars['fenv_'+str(i)][j],dummy_vars[i][j]],description=f"Gamma constraint for {j}-th point at {i}-th time step")
                     #prog.AddConstraint(lambda fdummy:self.dummy_friction_residual_constraint(self.problem.mu_env,*np.split(fdummy,[self.friction_dim+1])),lb=[0.],ub=[0.],vars=np.concatenate([force_vars['fenv_'+str(i)][j],[dummy_vars[i][j]]]))
-                    prog.AddConstraint(lambda z: [z[0]*z[1]],lb=[-np.inf],ub=[self.param.comp_threshold],vars=[dummy_vars[i][j],gamma_vars[i][j]])
+                    prog.AddConstraint(lambda z: [z[0]*z[1]],lb=[-np.inf],ub=[self.comp_threshold],vars=[dummy_vars[i][j],gamma_vars[i][j]])
                     prog.AddBoundingBoxConstraint(0,np.inf,gamma_vars[i][j]).evaluator().set_description(f"Gamma constraint for {j}-th point at {i}-th time step")
 
             # Constraints on manipulation contacts
@@ -1021,7 +1111,7 @@ class MPCC(object):
                     if self.param.use_alpha:
                         prog.AddConstraint(lambda qxfa:self.force_on_off(self.problem.manipulation_contact_points[j],*np.split(qxfa,[4, 4+3, 7+1])),lb=[4e-2,0],ub=[np.inf,0],vars=np.concatenate([q[i],x[i],[force_vars['fmnp_'+str(i)][j][0]],alpha_vars[i][j]])).evaluator().set_description(f"Force on_off for {j}-th point at {i}-th time step")    
                     else:
-                        prog.AddConstraint(lambda qxf:self.force_on_off(self.problem.manipulation_contact_points[j],np.split(qxf,[4,4+3])),lb=[0.],ub=[self.param.comp_threshold],vars=np.concatenate([q[i],x[i],[force_vars['fmnp_'+str(i)][j][0]]])).evaluator().set_description(f"Force on_off for {j}-th point at {i}-th time step")
+                        prog.AddConstraint(lambda qxf:self.force_on_off(self.problem.manipulation_contact_points[j],np.split(qxf,[4,4+3])),lb=[0.],ub=[self.comp_threshold],vars=np.concatenate([q[i],x[i],[force_vars['fmnp_'+str(i)][j][0]]])).evaluator().set_description(f"Force on_off for {j}-th point at {i}-th time step")
                                 
             # Balance constraints
             #fvecs = [force_vars['fenv_'+str(i)][j] for j in range(len(self.iterate.states[i].index_set))]+[force_vars['fmnp_'+str(i)][j] for j in range(len(self.problem.manipulation_contact_points))]
@@ -1157,19 +1247,32 @@ if __name__ == '__main__':
         if args.debug:
             print(f"Debug mode is on")
             problem.init_sdf_cache(debug=True)
-            from visualization import plot_problem_klampt
-            plot_problem_klampt(problem)
+            from visualization import plot_problem_klampt,plot_trajectory_klampt
+            #plot_problem_klampt(problem,show=False)
+            #vis.show()
+            #while vis.shown():
+            #    time.sleep(0.1)
+            #vis.show(False)
 
     problem.manipuland_name = manipuland
     problem.environment_name = environment
     stocs_3d = STOCS(problem,params)
+
+    if args.debug:
+        def vis_update(iterate):
+            print("Performed vis_update")
+            plot_trajectory_klampt(iterate,problem,False)
+            time.sleep(0.1)
+        stocs_3d.set_callback(vis_update)
+        vis.show()
+        plot_problem_klampt(problem,False)
 
     res = stocs_3d.solve()
     print(f"Time used: {res.time}s.")
     print(f"Success: {res.is_success}")
     print(f"Outer iterations: {res.total_iter}")
     print(f"Average index point: {res.average_index_points()}")
-    
+
     # Save the result as JSON
     import dataclasses
     import json
@@ -1178,9 +1281,13 @@ if __name__ == '__main__':
         os.makedirs(folder)
     print("Saving results to", folder)
     with open(f'{folder}/result.json', 'w') as f:
-        json.dump(dataclasses.asdict(res),f)
+        json.dump(dataclasses.asdict(res),f,cls=NumpyEncoder)
     with open(f'{folder}/params.json', 'w') as f:
-        json.dump(dataclasses.asdict(params),f)
+        json.dump(dataclasses.asdict(params),f,cls=NumpyEncoder)
     with open(f'{folder}/problem.json', 'w') as f:
         replaced_problem = replace(problem,manipuland=None,environments=[],environment_sdf_cache=None)
-        json.dump(dataclasses.asdict(replaced_problem),f)
+        json.dump(dataclasses.asdict(replaced_problem),f,cls=NumpyEncoder)
+    
+    while vis.shown():
+        time.sleep(0.1)
+    vis.kill()
