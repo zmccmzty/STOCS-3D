@@ -1,6 +1,6 @@
 
 import numpy as np
-#import pydrake.all as pd
+import pydrake.all as pd
 #from pydrake.autodiffutils import AutoDiffXd
 from typing import List,Tuple,Dict,Optional,Union,Callable,Any
 FloatOrVector = Union[float,np.array]
@@ -24,7 +24,7 @@ class Variable:
         ub (float or np.array, optional): The upper bound of the variable.
         description (str, optional): A description of the variable.
     """
-    def __init__(self, name : str,
+    def __init__(self, name : Union[str,Tuple[Any]],
                  value : FloatOrVector=None,
                  shape : Tuple[int]=None,
                  lb : FloatOrVector=None,
@@ -33,38 +33,55 @@ class Variable:
         self.name = name
         self.value = value
         self.shape = shape
-        if self.value is not None:
-            shape = np.shape(self.value)
-            if self.shape is not None:
-                assert shape == self.shape,"Both value and shape provided, but they don't match"
-            self.shape = shape
         self.lb = lb
         self.ub = ub
         self.description = description
         self.solver_encoding = None
         self.solver_impl = None
+        if self.value is not None:
+            shape = np.shape(self.value)
+            if self.shape is not None:
+                assert shape == self.shape,f"Variable {self.name_and_description()}: Both value and shape provided, but they don't match"
+            self.shape = shape
+        if lb is not None:
+            assert np.shape(lb) == self.shape,f"Variable {self.name_and_description()}: lower bounds doesn't match shape"
+        if ub is not None:
+            assert np.shape(ub) == self.shape,f"Variable {self.name_and_description()}: upper bounds doesn't match shape"
     
+    def name_str(self) -> str:
+        if isinstance(self.name,tuple):
+            return '_'.join(str(s) for s in self.name)
+        return self.name
+
+    def name_and_description(self) -> str:
+        name = self.name_str()
+        if self.description is not None:
+            return f'{name} ({self.description})'
+        return name
+
     def set(self,value : FloatOrVector):
         if self.shape is not None:
-            assert value.shape == self.shape
+            assert np.shape(value) == self.shape
         self.value = value
     
     def get(self) -> FloatOrVector:
-        assert all(self.value is not None),f"Variable {self.name} value not set"
+        assert self.value is not None,f"Variable {self.name_and_description()} value not set"
         return self.value
 
     def lower_bound(self):
         """Returns the lower bound of the variable. If not set, returns
         negative infinity for each element of the variable."""
         if self.lb is not None:
+            assert np.shape(self.lb) == self.shape,f"Variable {self.name_and_description()}: lower bounds doesn't match shape"
             return self.lb
         return np.full(self.shape,-np.inf)
 
     def upper_bound(self):
         """Returns the upper bound of the variable. If not set, returns
         positive infinity for each element of the variable."""
-        if self.lb is not None:
-            return self.lb
+        if self.ub is not None:
+            assert np.shape(self.ub) == self.shape,f"Variable {self.name_and_description()}: upper bounds doesn't match shape"
+            return self.ub
         return np.full(self.shape,np.inf)
 
     def __getitem__(self,index):
@@ -75,8 +92,23 @@ class _IndexedVariable:
     def __init__(self,v:Variable,index):
         self.parent = v
         self.index = index
-        self.name = f'{v.name}[{index}]'
-        self.description = f'{v.description}[{index}]'
+        if isinstance(v.name,tuple):
+            self.name = v.name + (index,)
+        else:
+            self.name = (v.name,index)
+        if v.description is not None:
+            self.description = f'{v.description}[{index}]'
+        else:
+            self.description = None
+
+    def name_str(self) -> str:
+        return '_'.join(str(s) for s in self.name[:-1]) + '[' + str(self.index) + ']'
+    
+    def name_and_description(self) -> str:
+        name = self.name_str()
+        if self.description is not None:
+            return f'{name} ({self.description})'
+        return name
 
     def set(self,value : FloatOrVector):
         self.parent.get()[self.index] = value
@@ -119,13 +151,21 @@ class Function:
                  name : str=None,
                  description : str=None):
         self.func = func
-        self.variables = [variables] if isinstance(variables,Variable) else variables
+        self.variables = [variables] if isinstance(variables,(Variable,_IndexedVariable)) else list(variables)
         self.pre_args = list(pre_args) if pre_args is not None else []
         self.post_args = list(post_args) if post_args is not None else []
         self.name = name
         self.description = description
         self.solver_encoding = None
         self.solver_impl = None
+        assert len(self.variables) > 0,"Must provide at least one variable"
+        import inspect
+        argspec = inspect.getfullargspec(func)
+        if argspec.varargs is not None or argspec.kwonlyargs is not None:
+            pass
+        else:
+            if len(argspec.args) != len(self.pre_args)+len(self.variables)+len(self.post_args):
+                raise ValueError(f"Function {func} has {len(argspec.args)} arguments, but {len(self.pre_args)+len(self.variables)+len(self.post_args)} were provided")
 
     def shape(self):
         """Returns the shape of the function output.  By default, this will
@@ -134,8 +174,10 @@ class Function:
         return np.shape(self.__call__())
         
     def __call__(self,*args):
-        if args is None:
+        if len(args)==0:
             args = [v.get() for v in self.variables]
+        else:
+            args = list(args)
         return self.func(*(self.pre_args+args+self.post_args))
 
 
@@ -177,7 +219,10 @@ class ConstraintFunction(Function):
             self.ub = rhs
             self._equality = True
         else:
-            self._equality = np.all(self.lower_bound() == self.upper_bound())
+            if lb is not None and ub is not None:
+                self._equality = np.all(lb == ub)
+            else:
+                self._equality = False
         assert self.lb is not None or self.ub is not None,"Must set at least one of lb or ub"
 
     def lower_bound(self):
@@ -234,7 +279,7 @@ class NonlinearProgramSolver(object):
         properly set up."""
         assert self.objective is not None,"Objective not set"
         for k,v in self.variables.items():
-            assert v.value is not None,f"Variable {k} value not set {v.description if v.description is not None else ''}"
+            assert v.value is not None,f"Variable {v.name_and_description()} value not set"
         assert self.objective is not None,"Objective not set"
         try:
             self.objective()
@@ -246,11 +291,18 @@ class NonlinearProgramSolver(object):
             try:
                 c()
             except Exception:
-                desc = c.description if c.description is not None else ''
-                print("Exception raised while trying to evaluate constraint",k,desc)
+                if isinstance(k,tuple):
+                    desc = '_'.join(str(s) for s in k)
+                if c.description:
+                    desc = desc + ' (' + c.description + ')'
+                else:
+                    desc = k
+                print("Exception raised while trying to evaluate constraint",desc,"on variables",[v.name_str() for v in c.variables])
                 raise
             for v in c.variables:
-                assert v in self.variables,f"Constraint {k} has variable {v} not in variables dict"
+                while isinstance(v,_IndexedVariable):
+                    v=v.parent
+                assert v in self.variables.values(),f"Constraint {k} has variable {v} not in variables dict"
 
     def setup_drake_program(self):
         prog = pd.MathematicalProgram()

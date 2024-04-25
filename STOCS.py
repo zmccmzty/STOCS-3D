@@ -220,8 +220,8 @@ class STOCS(NonlinearProgramSolver):
         self.comp_threshold = None
         # Constant variables and functions
         k = self.optimization_params.friction_dim
-        qs = [Variable('q',shape=(4,),description=f'rotation[{i}]') for i in range(self.N)]
-        xs = [Variable('x',shape=(3,),lb=np.array(self.problem.x_bound[0]),ub=np.array(self.problem.x_bound[1]),description=f'position[{i}]') for i in range(self.N)]
+        qs = [Variable(('q',i),shape=(4,),description=f'rotation[{i}]') for i in range(self.N)]
+        xs = [Variable(('x',i),shape=(3,),lb=np.array(self.problem.x_bound[0]),ub=np.array(self.problem.x_bound[1]),description=f'position[{i}]') for i in range(self.N)]
         qs[0].lb = np.array(so3.quaternion(self.problem.T_init[0]))-self.problem.initial_pose_relaxation
         qs[0].ub = np.array(so3.quaternion(self.problem.T_init[0]))+self.problem.initial_pose_relaxation
         qs[-1].lb = np.array(so3.quaternion(self.problem.T_goal[0]))-self.problem.goal_pose_relaxation
@@ -230,33 +230,35 @@ class STOCS(NonlinearProgramSolver):
         xs[0].ub = np.minimum(xs[0].ub,np.array(self.problem.T_init[1])+self.problem.initial_pose_relaxation)
         xs[-1].lb = np.maximum(xs[-1].lb,np.array(self.problem.T_goal[1])-self.problem.goal_pose_relaxation)
         xs[-1].ub = np.minimum(xs[-1].ub,np.array(self.problem.T_goal[1])+self.problem.goal_pose_relaxation)
-        ws = [Variable('w',shape=(3,),description=f'angular velocity[{i}]') for i in range(self.N)]
-        vs = [Variable('v',shape=(3,),lb=np.array(self.problem.v_bound[0]),ub=np.array(self.problem.v_bound[1]),description=f'velocity[{i}]') for i in range(self.N)]
+        ws = [Variable(('w',i),shape=(3,),description=f'angular velocity[{i}]') for i in range(self.N)]
+        vs = [Variable(('v',i),shape=(3,),lb=np.array(self.problem.v_bound[0]),ub=np.array(self.problem.v_bound[1]),description=f'velocity[{i}]') for i in range(self.N)]
         force_lb = np.zeros(1+k)
-        force_ub = np.full(self.problem.fmnp_max)
+        force_ub = np.full(1+k,self.problem.fmnp_max)
         force_ub[1:] *= self.problem.mu_mnp
         m = len(self.problem.manipulation_contact_points)
-        f_mnp = [Variable('f_mnp',shape=(m,1+k),lb=np.hstack([force_lb]*m),ub=np.hstack([force_ub]*m),description=f'manipulator force[{i}], friction cone encoding') for i in range(self.N)]
-        f_env = [Variable('f_env',shape=(0,1+k),description=f'environment force[{i}], friction cone encoding') for i in range(self.N)]
+        f_mnp = [Variable(('f_mnp',i),shape=(m,1+k),lb=np.vstack([force_lb]*m),ub=np.vstack([force_ub]*m),description=f'manipulator force[{i}], friction cone encoding') for i in range(self.N)]
+        #should we put f_env in a dynamically changing matrix or individual variables?
+        #f_env = [Variable(('f_env',i),shape=(0,1+k),value=np.zeros((0,1+k)),description=f'environment force[{i}], friction cone encoding') for i in range(self.N)]
         for i in range(self.N):
             self.variables[('q',i)] = qs[i]
             self.variables[('x',i)] = xs[i]
             self.variables[('w',i)] = ws[i]
             self.variables[('v',i)] = vs[i]
             self.variables[('f_mnp',i)] = f_mnp[i]
-            self.variables[('f_env',i)] = f_env[i]
+            #self.variables[('f_env',i)] = f_env[i]
         self.objective = ObjectiveFunction(lambda *args:0.0*args[0], qs+xs, description='zero objective')
         for i in range(self.N):
             self.constraints[('unit_quaternion',i)] = ConstraintFunction(lambda q:q@q, qs[i],lb=1,ub=1,description=f'unit quaternion[{i}]')
             self.constraints[('angular_velocity_bound',i)] = ConstraintFunction(lambda w:w@w, ws[i],lb=0,ub=self.problem.w_max,description=f'angular velocity bound[{i}]')
-            self.constraints[('force_balance',i)] = ConstraintFunction(self._force_balance_constraint,[qs[i],xs[i],vs[i],f_mnp[i],f_env[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'force balance[{i}]')
-            self.constraints[('torque_balance',i)] = ConstraintFunction(self._torque_balance_constraint,[qs[i],xs[i],ws[i],f_mnp[i],f_env[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'torque balance[{i}]')
+            self.constraints[('force_balance',i)] = ConstraintFunction(self._force_balance_constraint,[qs[i],xs[i],vs[i],f_mnp[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'force balance[{i}]')
+            self.constraints[('torque_balance',i)] = ConstraintFunction(self._torque_balance_constraint,[qs[i],xs[i],ws[i],f_mnp[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'torque balance[{i}]')
+            # self.constraints[('force_balance',i)] = ConstraintFunction(self._force_balance_constraint,[qs[i],xs[i],vs[i],f_mnp[i],f_env[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'force balance[{i}]')
+            # self.constraints[('torque_balance',i)] = ConstraintFunction(self._torque_balance_constraint,[qs[i],xs[i],ws[i],f_mnp[i],f_env[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'torque balance[{i}]')
             if i != 0:
                 self.constraints[('backward_euler_q',i)] = ConstraintFunction(self._backward_euler_q,[qs[i],qs[i-1],ws[i]],rhs=np.zeros(4),description=f'backward euler quaternion[{i}]')
                 self.constraints[('backward_euler_x',i)] = ConstraintFunction(self._backward_euler_x,[xs[i],xs[i-1],vs[i]],rhs=np.zeros(3),description=f'backward euler position[{i}]')
             for j in range(len(self.problem.manipulation_contact_points)):
-                self.constraints[('fmnp_friction_cone',i)] = ConstraintFunction(self._friction_cone_constraint,f_mnp[i][j],lb=0.0,description=f'friction cone[{i}]')
-        self.self_check()
+                self.constraints[('fmnp_friction_cone',i)] = ConstraintFunction(self._friction_cone_constraint,f_mnp[i][j],pre_args=(self.problem.mu_mnp,),lb=0.0,description=f'f_mnp friction cone[{i},{j}]')
 
     def set_callback(self, cb : Callable):
         """Sets a callback that will be called every iteration with the current
@@ -396,6 +398,7 @@ class STOCS(NonlinearProgramSolver):
             self.set_state(initial)
         else:
             raise NotImplementedError("Setting initial trajectory from SE3Trajectory not yet implemented")
+        self.self_check()
 
     def set_state(self, state : TrajectoryState):
         for i in range(self.N):
@@ -404,7 +407,7 @@ class STOCS(NonlinearProgramSolver):
             self.variables[('x',i)].set(state.states[i].x)
             self.variables[('w',i)].set(state.states[i].w)
             self.variables[('v',i)].set(state.states[i].v)
-            self.variables[('f_mnp',i)].set(np.concatenate(state.states[i].fmnp))
+            self.variables[('f_mnp',i)].set(np.stack(state.states[i].fmnp))
             for j in range(len(state.states[i].index_set)):
                 self.variables[('f_env',i,j)].set(state.states[i].fenv[j])
                 self.variables[('d',i,j)].set(state.states[i].d[j])
@@ -443,13 +446,13 @@ class STOCS(NonlinearProgramSolver):
             #initialize, if necessary
             self.set_initial_state()
 
-        stocs_res = Result(is_success=False,total_iter=0,iterates=[],final=replace(self.current_iterate))
+        stocs_res = Result(is_success=False,total_iter=0,iterates=[],final=copy.deepcopy(self.current_iterate))
         print("Initial score function",self._score_function(self.current_iterate))
         if self.callback is not None:
             self.callback(self.current_iterate)
         while iter < self.optimization_params.stocs_max_iter:
             #call oracle
-            new_index_set, removed_index_set = self.oracle(self.current_iterate)
+            new_index_set, removed_index_set = self.oracle(self.get_state())
 
             #update / initialize variables
             for i in range(self.N):
@@ -598,8 +601,8 @@ class STOCS(NonlinearProgramSolver):
         finit = np.array([1e-3] + [1e-3]*k)
         for j in range(m,m+len(new_points)):
             point = new_points[j-m]
-            fij = Variable(name='f_env',value=finit, lb=np.zeros(1+k),ub=np.array([self.problem.fenv_max]+[self.problem.fenv_max*self.problem.mu_env]*k))
-            dij = Variable(name='d',value=0.0,lb=0.0,description=f'environment distance to index point {i}, {j}')
+            fij = Variable(name=('f_env',i,j),value=finit, lb=np.zeros(1+k),ub=np.array([self.problem.fenv_max]+[self.problem.fenv_max*self.problem.mu_env]*k))
+            dij = Variable(name=('d',i,j),value=0.0,lb=0.0,description=f'environment distance to index point {i}, {j}')
 
             self.variables[('f_env',i,j)] = fij
             self.variables[('d',i,j)] = dij
@@ -607,19 +610,23 @@ class STOCS(NonlinearProgramSolver):
             self.constraints[('torque_balance',i)].variables.append(fij)
             self.constraints[('d_distance_equality',i,j)] = ConstraintFunction(self._point_distance_constraint,[qi,xi,dij],pre_args=(point,),rhs=0.0)
             self.constraints[('force_distance_complementarity',i,j)] = ConstraintFunction(lambda f,d:f*d,[fij,dij],ub=self.comp_threshold)
-            
+            self.constraints[('fenv_friction_cone',i,j)] = ConstraintFunction(self._friction_cone_constraint,fij,pre_args=(self.problem.mu_env,),lb=0.0,description=f'fenv friction cone[{i},{j}]')
+
+
             if self.optimization_params.velocity_complementarity:
-                gij = Variable(name='gamma',value=0.0,lb=0.0,description=f'tangential velocity bound for index point {i}, {j}')
-                dummyij = Variable(name='dummy',value=0.0,lb=0.0,description=f'dummy variable for velocity complementarity for index point {i}, {j}')
+                gij = Variable(name=('gamma',i,j),value=0.0,lb=0.0,description=f'tangential velocity bound for index point {i}, {j}')
+                dummyij = Variable(name=('dummy',i,j),value=0.0,lb=0.0,description=f'dummy variable for velocity complementarity for index point {i}, {j}')
                 self.variables[('gamma',i,j)] = gij
                 self.variables[('dummy',i,j)] = dummyij
-                self.constraints[('dummy_friction_residual_constraint',i,j)] = ConstraintFunction(lambda f,d:self._friction_cone(f)-d,[fij,dij],rhs=0.0,description=f'Dummy = friction residual [{i},{j}]')
+                def dummy_friction_residual(f,d):
+                    return self._friction_cone_constraint(self.problem.mu_env,f)-d
+                self.constraints[('dummy_friction_residual_constraint',i,j)] = ConstraintFunction(dummy_friction_residual,[fij,dij],rhs=0.0,description=f'Dummy = friction residual [{i},{j}]')
                 lb = [-np.inf]*k+[0.]*k
                 ub = [self.comp_threshold]*k+[np.inf]*k
                 self.constraints[('velocity_complementarity',i,j)] = ConstraintFunction(self._velocity_cc_constraint,[qi,wi,xi,vi,gij,fij],pre_args=(point,),lb=lb,ub=ub,description=f"Velocity CC constraint time {i}, index point {j}.") 
                 self.constraints[('dummy_gamma_complementarity',i,j)] = ConstraintFunction(lambda d,g: d*g, [dij,gij],ub=self.comp_threshold)
             else:
-                self.constraints[('fenv_friction_cone',i)] = ConstraintFunction(self._friction_cone,fij,lb=0.0,description=f'fenv friction[{i},{j}]')
+                self.constraints[('fenv_friction_cone',i)] = ConstraintFunction(self._friction_cone_constraint,fij,lb=0.0,description=f'fenv friction[{i},{j}]')
 
                 # # Force on and off
                 # if self.optimization_params.force_on_off:
@@ -632,7 +639,7 @@ class STOCS(NonlinearProgramSolver):
                 self.variables[('alpha',i,j)] = Variable(name='alpha',value=0.0,lb=0.0)
 
         #add new index points
-        self.current_index_sets[i] += new_points[i]
+        self.current_index_sets[i] += new_points
 
     def evaluate(self,traj : TrajectoryState = None):
         if traj is None:
@@ -725,12 +732,12 @@ class STOCS(NonlinearProgramSolver):
         return f
     
     def _force_balance_constraint(self, t : int, q, x, v, f_mnp, *f_env) -> np.ndarray:
-        if len(self.current_index_sets[t]) > 0:
-            assert len(f_env) == len(self.current_index_sets[t])
-            for fe in f_env:
-                assert len(fe) == self.optimization_params.friction_dim+1
+        k = self.optimization_params.friction_dim
+        assert len(f_env) == len(self.current_index_sets[t])
+        for fe in f_env:
+            assert len(fe) == k+1
         if len(self.problem.manipulation_contact_points) > 0:
-            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}: {f_mnp.shape} vs {(len(self.problem.manipulation_contact_points),(self.friction_dim+1))}"
+            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(k+1)), f"Manipulator force dimension is not correct, timestep {t}: {f_mnp.shape} vs {(len(self.problem.manipulation_contact_points),(self.friction_dim+1))}"
         R = so3.from_quaternion(q)
 
         force = 0
@@ -760,22 +767,24 @@ class STOCS(NonlinearProgramSolver):
             else:
                 return np.array([force[0],force[1],force[2]])
 
-    def _torque_balance_constraint(self,t : int, q, x, w, f_env, f_mnp) -> np.ndarray:
-        if len(self.current_index_sets[t]) > 0:
-            assert f_env.shape == (len(self.iterate.states[t].index_set),(self.friction_dim+1)), f"Environment force dimension is not correct, timestep {t}"
+    def _torque_balance_constraint(self,t : int, q, x, w, f_mnp, *f_env) -> np.ndarray:
+        k = self.optimization_params.friction_dim
+        assert len(f_env) == len(self.current_index_sets[t])
+        for fe in f_env:
+            assert len(fe) == k+1
         if len(self.problem.manipulation_contact_points) > 0:
-            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(self.friction_dim+1)), f"Manipulator force dimension is not correct, timestep {t}"
+            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(k+1)), f"Manipulator force dimension is not correct, timestep {t}"
         R = so3.from_quaternion(q)
         com_world = se3.apply((R,x),self.problem.manipuland_com)
 
         torque = 0
 
         # Contact with the environment
-        for i,point in enumerate(self.iterate.states[t].index_set):
+        for i,point in enumerate(self.current_index_sets[t]):
             f_env_i = f_env[i]
             point_world = se3.apply((R,x),point[:3])
 
-            dir_n_ = np.asarray(self.environment_distance_gradient(point_world))
+            dir_n_ = np.asarray(self._environment_distance_gradient(point_world))
             N_normal = dir_n_ / np.linalg.norm(dir_n_)
             
             force = np.array(self.force_3d(f_env_i,N_normal))
@@ -878,7 +887,7 @@ class STOCS(NonlinearProgramSolver):
         v_real = vectorops.add(v_relative,v)
 
         point_world = se3.apply((R,x),point)
-        dir_n_ = np.asarray(self.environment_distance_gradient(point_world))
+        dir_n_ = np.asarray(self._environment_distance_gradient(point_world))
         N_normal = dir_n_ / np.linalg.norm(dir_n_)
         
         v_tangential = vectorops.sub(v_real,vectorops.mul(N_normal,vectorops.dot(v_real,N_normal)))
@@ -889,7 +898,7 @@ class STOCS(NonlinearProgramSolver):
             phi = (2*math.pi/int(self.optimization_params.friction_dim))*j
             T_friction = so3.apply(N_frame,(0,math.cos(phi),math.sin(phi)))
             # method 1
-            res1.append(gamma + vectorops.dot(v_tangential,T_friction)*f[j+1])
+            res1.append((gamma + vectorops.dot(v_tangential,T_friction))*f[j+1])
             # method 2
             #res1.append(vectorops.dot(v_tangential,T_friction)*f[j+1])
             res2.append(gamma + vectorops.dot(v_tangential,T_friction))
