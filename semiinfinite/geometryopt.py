@@ -15,12 +15,13 @@ import numpy as np
 import scipy
 
 #whether to try to use PyCCD for fast distance queries
-try:
-    import pyccd
-    PYCCD_ENABLED = True
-except ImportError:
-    PYCCD_ENABLED = False
 TEST_PYCCD = False
+if TEST_PYCCD:
+    try:
+        import pyccd
+        PYCCD_ENABLED = True
+    except ImportError:
+        PYCCD_ENABLED = False
 
 #whether to populate point clouds with interior points
 ADD_INTERIOR_POINTS = False       #adds interior points in the point cloud
