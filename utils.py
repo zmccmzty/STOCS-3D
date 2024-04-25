@@ -4,7 +4,6 @@ from klampt import Geometry3D,VolumeGrid,DistanceQuerySettings,DistanceQueryResu
 from klampt.math import se3
 from semiinfinite.geometryopt import PenetrationDepthGeometry
 import json
-from dataclasses import dataclass,field
 
 
 class SDFCache:
