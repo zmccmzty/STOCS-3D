@@ -5,7 +5,6 @@ import trimesh
 # import from semiinfinite, which is a package in the parent directory
 import sys
 import os
-import open3d as o3d
 
 # Add the parent directory to sys.path
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,33 +16,6 @@ manipuland_name = "cube"
 
 manipuland_fn = "data/manipulands/cube/cube.off"
 terrain_fn = "data/environments/plane/cube.off"
-
-# Load environment
-distances_param = np.load(
-    f"data/environments/{environment_name}/params.npy", allow_pickle=True
-).item()
-x1, x2, y1, y2, z1, z2, n1, n2, n3, h1, h2, h3 = (
-    distances_param["x1"],
-    distances_param["x2"],
-    distances_param["y1"],
-    distances_param["y2"],
-    distances_param["z1"],
-    distances_param["z2"],
-    distances_param["n1"],
-    distances_param["n2"],
-    distances_param["n3"],
-    distances_param["h1"],
-    distances_param["h2"],
-    distances_param["h3"],
-)
-grid_x = np.arange(n1 + 1) * h1 + x1
-grid_y = np.arange(n2 + 1) * h2 + y1
-grid_z = np.arange(n3 + 1) * h3 + z1
-
-distances = np.load(f"data/environments/{environment_name}/distance_field.npy")
-gradient_x = np.load(f"data/environments/{environment_name}/gradient_x_field.npy")
-gradient_y = np.load(f"data/environments/{environment_name}/gradient_y_field.npy")
-gradient_z = np.load(f"data/environments/{environment_name}/gradient_z_field.npy")
 
 # Geometry in Trimesh
 scale_x = 0.05
@@ -72,9 +44,6 @@ manipuland_g3d.transform([scale_x, 0, 0, 0, scale_y, 0, 0, 0, scale_z], [0.0, 0.
 
 environments = [PenetrationDepthGeometry(terrain, gridres, pcres)]
 manipuland = PenetrationDepthGeometry(manipuland_g3d, gridres, pcres)
-
-object_mesh_o3d = o3d.io.read_triangle_mesh(manipuland_fn)
-object_mesh_o3d.scale(scale_x, center=[0, 0, 0])
 
 I = np.array(
     [
@@ -138,8 +107,6 @@ manipuland_params = {
     "manipuland_name": manipuland_name,
     "manipuland_fn": manipuland_fn,
     "manipuland": manipuland,
-    "manipuland_g3d": manipuland_g3d,
-    "manipuland_o3d": object_mesh_o3d,
     "scale_x": scale_x,
     "scale_y": scale_y,
     "scale_z": scale_z,
@@ -150,12 +117,7 @@ manipuland_params = {
 
 environment_params = {
     "environment_name": environment_name,
-    "distances": distances,
-    "gradient_x": gradient_x,
-    "gradient_y": gradient_y,
-    "gradient_z": gradient_z,
     "environments": environments,
-    "distances_param": distances_param,
 }
 
 optimization_params = {

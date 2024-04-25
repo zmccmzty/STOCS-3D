@@ -1071,7 +1071,7 @@ def optimizeCollFree(obj,env,Tinit,Tdes=None,
     res = optimizeSemiInfinite(objective,[constraint],Tinit,verbose=verbose,settings=settings)
 
     #format the output
-    if not want_trace and not want_times and not want_constraint_pts:
+    if not want_trace and not want_times and not want_constraints:
         return res.x
     retlist = [res.x]
     if want_trace:
@@ -1112,7 +1112,7 @@ def optimizeCollFreeMinDist(obj,env,Tinit,Tdes=None,
     res = optimizeStandard(objective,[constraint],Tinit,verbose=verbose,settings=settings)
 
     #format the output
-    if not want_trace and not want_times and not want_constraint_pts:
+    if not want_trace and not want_times and not want_constraints:
         return res.x
     retlist = [res.x]
     if want_trace:
@@ -1215,7 +1215,7 @@ def optimizeCollFreeRobot(robot,env,qdes=None,qinit=None,objective=None,constrai
     res = optimizeSemiInfinite(objective,constraints,qinit,qmin,qmax,verbose=verbose,settings=settings)
 
     #format the output
-    if not want_trace and not want_times and not want_constraint_pts:
+    if not want_trace and not want_times and not want_constraints:
         return res.x
     retlist = [res.x]
     if want_trace:
@@ -1330,7 +1330,7 @@ def optimizeCollFreeTrajectory(trajcache,traj0,env,objective=None,constraints=No
     
     #format the output
     traj = trajcache.stateToTrajectory(res.x)
-    if not want_trace and not want_times and not want_constraint_pts:
+    if not want_trace and not want_times and not want_constraints:
         return traj
     retlist = [traj]
     if want_trace:

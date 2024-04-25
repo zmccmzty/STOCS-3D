@@ -25,6 +25,11 @@ class STOCS(object):
         self.x_goal = self.param['task_params']['x_goal']
 
         self.manipuland = self.param['manipuland_params']['manipuland']
+        if 'environment_sdf_cache' not in param['environment_params']:
+            envs = param['environment_params']['environments']
+            print("Precomputing gradients of environment SDF...")
+            param['environment_params']['environment_sdf_cache'] = compute_unified_sdf(envs)
+            print("Done.")
 
     def score_function(self,mpcc,res):
         q = res['q']
@@ -179,6 +184,11 @@ class STOCS(object):
 
     def plot_index_points(self,q,x):
         import open3d as o3d
+        if 'manipuland_o3d' not in self.param['manipuland_params']:
+            from klampt.io import open3d_convert
+            geometry = open3d_convert.to_open3d(self.param['manipuland_params']['manipuland'].geom)
+            self.param['manipuland_params']['manipuland_o3d'] = geometry
+        geometry = self.param['manipuland_params']['manipuland_o3d']
         xyz = np.zeros((len(self.active_index_set[0]),3))
         for i,index_pt in enumerate(self.active_index_set[0]):
             xyz[i,:] = index_pt
@@ -187,12 +197,12 @@ class STOCS(object):
         coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
         coord.scale(0.1, center=[0,0,0])
         T = se3.ndarray((so3.from_quaternion(q),x))
-        self.param['manipuland_params']['manipuland_o3d'].transform(T)
+        geometry.transform(T)
         pcd.transform(T)
         coord.translate(x)
         #o3d.visualization.draw_geometries([object_mesh_o3d,pcd,coord])
-        o3d.visualization.draw_geometries([self.param['manipuland_params']['manipuland_o3d'],pcd])
-        self.param['manipuland_params']['manipuland_o3d'].transform(np.linalg.inv(T))
+        o3d.visualization.draw_geometries([geometry,pcd])
+        geometry.transform(np.linalg.inv(T))
         return None 
 
     def constraint_violation(self,mpcc,res):
