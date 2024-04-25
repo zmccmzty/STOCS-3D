@@ -338,24 +338,7 @@ class STOCS(object):
 
         return residual
 
-    def plot_index_points(self,q,x):
-        xyz = np.zeros((len(self.active_index_set[0]),3))
-        for i,index_pt in enumerate(self.active_index_set[0]):
-            xyz[i,:] = index_pt[:3]
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(xyz)
-        coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
-        coord.scale(0.1, center=[0,0,0])
-        T = se3.ndarray((so3.from_quaternion(q),x))
-        self.param['manipuland_params']['manipuland_o3d'].transform(T)
-        pcd.transform(T)
-        coord.translate(x)
-        o3d.visualization.draw_geometries([self.param['manipuland_params']['manipuland_o3d'],pcd])
-        self.param['manipuland_params']['manipuland_o3d'].transform(np.linalg.inv(T))
-        return None 
-
     def solve(self):
-        
         t_start = time.time()
         iter = 0
         stocs_res = {}
