@@ -5,7 +5,6 @@ import trimesh
 # import from semiinfinite, which is a package in the parent directory
 import sys
 import os
-import open3d as o3d
 
 # Add the parent directory to sys.path
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
