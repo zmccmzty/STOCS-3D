@@ -33,44 +33,6 @@ iter = res['total_iter']
 q_sol = res[f'iter_{iter}']['q']
 x_sol = res[f'iter_{iter}']['x']
 
-distances_param = params['environment_params']['distances_param']
-x1, x2, y1, y2, z1, z2, n1, n2, n3, h1, h2, h3 = (
-    distances_param["x1"],
-    distances_param["x2"],
-    distances_param["y1"],
-    distances_param["y2"],
-    distances_param["z1"],
-    distances_param["z2"],
-    distances_param["n1"],
-    distances_param["n2"],
-    distances_param["n3"],
-    distances_param["h1"],
-    distances_param["h2"],
-    distances_param["h3"],
-)
-
-h1, h2, h3 = (x2 - x1) / n1, (y2 - y1) / n2, (z2 - z1) / n3 # grid spacing
-grid_x = np.arange(n1 + 1) * h1 + x1 # grid points in x direction
-grid_y = np.arange(n2 + 1) * h2 + y1 # grid points in y direction
-grid_z = np.arange(n3 + 1) * h3 + z1 # grid points in z direction
-
-gradient_x = params['environment_params']['gradient_x']
-gradient_y = params['environment_params']['gradient_y']
-gradient_z = params['environment_params']['gradient_z']
-distances = params['environment_params']['distances']
-
-def distance_function(x,y,z):
-    return trilinear_interpolation(grid_x, grid_y, grid_z, distances, x, y, z)
-
-def gradient_x_function(x,y,z):
-    return trilinear_interpolation(grid_x, grid_y, grid_z, gradient_x, x, y, z)
-
-def gradient_y_function(x,y,z):
-    return trilinear_interpolation(grid_x, grid_y, grid_z, gradient_y, x, y, z)
-
-def gradient_z_function(x,y,z):
-    return trilinear_interpolation(grid_x, grid_y, grid_z, gradient_z, x, y, z)
-
 import klampt
 vis.init()
 world = klampt.WorldModel()

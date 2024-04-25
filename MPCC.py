@@ -38,52 +38,16 @@ class MPCC(object):
         self.q_goal = self.param['task_params']['q_goal']
         self.x_goal = self.param['task_params']['x_goal']
 
-        self.distances = self.param['environment_params']['distances']
-        self.gradient_x = self.param['environment_params']['gradient_x']
-        self.gradient_y = self.param['environment_params']['gradient_y']
-        self.gradient_z = self.param['environment_params']['gradient_z']
-        
-        distances_param = self.param['environment_params']['distances_param']
-        x1, x2, y1, y2, z1, z2, n1, n2, n3, h1, h2, h3 = (
-            distances_param["x1"],
-            distances_param["x2"],
-            distances_param["y1"],
-            distances_param["y2"],
-            distances_param["z1"],
-            distances_param["z2"],
-            distances_param["n1"],
-            distances_param["n2"],
-            distances_param["n3"],
-            distances_param["h1"],
-            distances_param["h2"],
-            distances_param["h3"],
-        )
+        self.environment_sdf_cache = self.param['environment_params']['environment_sdf_cache']  # type: SDFCache
 
-        h1, h2, h3 = (x2 - x1) / n1, (y2 - y1) / n2, (z2 - z1) / n3 # grid spacing
-        self.grid_x = np.arange(n1 + 1) * h1 + x1 # grid points in x direction
-        self.grid_y = np.arange(n2 + 1) * h2 + y1 # grid points in y direction
-        self.grid_z = np.arange(n3 + 1) * h3 + z1 # grid points in z direction
-
-    def distance_function(self,x,y,z):
-        return trilinear_interpolation(self.grid_x, self.grid_y, self.grid_z, self.distances, x, y, z)
-
-    def gradient_x_function(self,x,y,z):
-        return trilinear_interpolation(self.grid_x, self.grid_y, self.grid_z, self.gradient_x, x, y, z)
-
-    def gradient_y_function(self,x,y,z):
-        return trilinear_interpolation(self.grid_x, self.grid_y, self.grid_z, self.gradient_y, x, y, z)
-
-    def gradient_z_function(self,x,y,z):
-        return trilinear_interpolation(self.grid_x, self.grid_y, self.grid_z, self.gradient_z, x, y, z)
-
+    
     def point_distance_constraint(self,point_,x_):
 
         q, x, d = np.split(x_, [4, 4+3])
         point, env_idx = point_[:3], point_[3]
 
         point_world = se3.apply((so3.from_quaternion(q),x),point)     
-        x_,y_,z_ = point_world  
-        dist = trilinear_interpolation(self.grid_x, self.grid_y, self.grid_z, self.distances, x_,y_,z_)
+        dist = self.environment_sdf_cache.distance(point_world)
 
         res = dist - d[0]
 
@@ -101,16 +65,9 @@ class MPCC(object):
             f_env_i = f_env[(self.friction_dim+1)*i:(self.friction_dim+1)*(i+1)]
             
             point_world = se3.apply((so3.from_quaternion(q),x),point)
-            x_world,y_world,z_world = point_world
-            dir_x = self.gradient_x_function(x_world,y_world,z_world)
-            dir_y = self.gradient_y_function(x_world,y_world,z_world)
-            dir_z = self.gradient_z_function(x_world,y_world,z_world)
-
-            dir_n_ = np.array([dir_x,dir_y,dir_z])
-            N_normal_ = dir_n_ / np.linalg.norm(dir_n_)
-
-            assert np.linalg.norm(N_normal_) != 0, "Normal is 0!!!"
-            N_normal = N_normal_ / np.linalg.norm(N_normal_)
+            dir_n_ = np.array(self.environment_sdf_cache.gradient(point_world))
+            N_normal = dir_n_ / np.linalg.norm(dir_n_)
+            assert np.linalg.norm(N_normal) != 0, "Normal is 0!!!"
 
             n1 = so3.canonical(N_normal)[3:6]
             n2 = so3.canonical(N_normal)[6:9]
@@ -169,12 +126,7 @@ class MPCC(object):
             f_env_i = f_env[(self.friction_dim+1)*i:(self.friction_dim+1)*(i+1)]
             point_world = se3.apply((so3.from_quaternion(q),x),point)
 
-            x_world,y_world,z_world = point_world
-            dir_x = self.gradient_x_function(x_world,y_world,z_world)
-            dir_y = self.gradient_y_function(x_world,y_world,z_world)
-            dir_z = self.gradient_z_function(x_world,y_world,z_world)
-
-            dir_n_ = np.array([dir_x,dir_y,dir_z])
+            dir_n_ = np.array(self.environment_sdf_cache.gradient(point_world))
             N_normal = dir_n_ / np.linalg.norm(dir_n_)
 
             torque += np.array(vectorops.cross(vectorops.sub(point_world,com_world),vectorops.mul(N_normal,f_env_i[0])))
@@ -270,12 +222,7 @@ class MPCC(object):
         v_real = vectorops.add(v_relative,v)
 
         point_world = se3.apply((so3.from_quaternion(q),x),point)
-        x_world,y_world,z_world = point_world
-        dir_x = self.gradient_x_function(x_world,y_world,z_world)
-        dir_y = self.gradient_y_function(x_world,y_world,z_world)
-        dir_z = self.gradient_z_function(x_world,y_world,z_world)
-
-        dir_n_ = np.array([dir_x,dir_y,dir_z])
+        dir_n_ = np.array(self.environment_sdf_cache.gradient(point_world))
         N_normal = dir_n_ / np.linalg.norm(dir_n_)
         
         v_tangential = vectorops.sub(v_real,vectorops.mul(N_normal,vectorops.dot(v_real,N_normal)))
