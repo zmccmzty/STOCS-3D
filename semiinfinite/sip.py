@@ -6,18 +6,16 @@ import scipy
 import scipy.sparse
 import scipy.sparse.linalg
 import scipy.io
-import heapq
 import random
 from klampt.math import vectorops
-from .objective import *
-from .constraint import *
+#from .objective import *
+from .constraint import SemiInfiniteConstraintInterface,SemiInfiniteConstraintAdaptor
 from . import utils
 try:
     import osqp
     OSQP_ENABLED = True
 except ImportError:
     OSQP_ENABLED = False
-    raise NotImplementedError("OSQP is currently required.  TODO: implement other solvers.")
 
 DEBUG_GRADIENTS = False
 DEBUG_TRAJECTORY_INITIALIZATION = False
@@ -302,6 +300,9 @@ class ConstraintGenerationData:
         #||x-xdes)||_W^2 + reg||x||^2 = (x-xdes)^T W (x-xdes) + x^T (reg I) x = 
         #x^T (W + reg) x - 2 x^T W xdes + const
         #equivalent to solving 1/2 x^T P x + q^T x   with P = W+reg and q = -W*xdes
+        if not OSQP_ENABLED:
+            raise NotImplementedError("OSQP is currently required.  TODO: implement other solvers.")
+
         solver = osqp.OSQP()
         n = len(xdes)
         m = len(b)

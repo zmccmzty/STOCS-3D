@@ -4,10 +4,17 @@ from klampt import *
 from klampt.math import vectorops,so3,se3
 from klampt.model.trajectory import Trajectory,RobotTrajectory
 from klampt.model.typing import RigidTransform,Vector3,Config
-from .sip import *
+from .constraint import  DomainInterface,CartesianProductDomain,SetDomain,IntervalDomain,UnionDomain,SemiInfiniteConstraintInterface,ConstraintInterface,MinimumConstraintAdaptor
+from .objective import ObjectiveFunctionInterface
+from .sip import SemiInfiniteOptimizationSettings,optimizeSemiInfinite,optimizeStandard,DEBUG_TRAJECTORY_INITIALIZATION
+import time
+import heapq
+#from .sip import *
+import random
 import numpy as np
 import scipy
 
+#whether to try to use PyCCD for fast distance queries
 try:
     import pyccd
     PYCCD_ENABLED = True
@@ -18,7 +25,6 @@ TEST_PYCCD = False
 #whether to populate point clouds with interior points
 ADD_INTERIOR_POINTS = False       #adds interior points in the point cloud
 USE_BALLS = False                  #associates interior points in the point cloud with balls (can only be True if ADD_INTERIOR_POINTS=True)
-
 
 def grid_to_numpy(grid : Geometry3D) -> np.ndarray:
     #for klampt 0.9+
@@ -38,6 +44,7 @@ def dump_grid_mat(grid,fn='grid.mat'):
     for i in range(arr.shape[0]):
         slices["slice_%d"%(i,)] = arr[i,:,:]
     scipy.io.savemat(fn,slices)
+
 
 
 class PenetrationDepthGeometry:
@@ -192,7 +199,6 @@ class PenetrationGeometryDomain(DomainInterface):
         for idx in range(self.g.pcdata.numPoints()):
             res.append(se3.apply(self.g.getTransform(),self.g.pcdata.getPoint(idx)))
         return res
-
 
 
 class RobotKinematicsCache:
