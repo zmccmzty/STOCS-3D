@@ -28,7 +28,7 @@ class STOCS(object):
         if 'environment_sdf_cache' not in param['environment_params']:
             envs = param['environment_params']['environments']
             print("Precomputing gradients of environment SDF...")
-            param['environment_params']['environment_sdf_cache'] = compute_unified_sdf(envs)
+            param['environment_params']['environment_sdf_cache'] = SDFCache(compute_unified_sdf(envs))
             print("Done.")
 
     def score_function(self,mpcc,res):
