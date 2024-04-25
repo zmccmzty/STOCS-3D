@@ -1,7 +1,6 @@
 import json
 from klampt import vis
 from STOCS import Problem, OptimizerParams, TrajectoryState
-from semiinfinite.geometryopt import *
 import dacite
 
 import argparse
