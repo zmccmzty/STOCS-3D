@@ -5,8 +5,9 @@ from STOCS import Problem, OptimizerParams, SmoothingOracleParams, PenetrationDe
 manipuland_fn = "data/manipulands/cube/cube.off"
 terrain_fn = "data/environments/plane/cube.off"
 
-gridres = 0.002
-pcres = 0.002
+gridres = 0.005
+pcres = 0.005
+
 
 # Set up manipuland
 scale_x = 0.05
