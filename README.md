@@ -57,7 +57,7 @@ You can run STOCS on the example environments and objects as follows:
 
 > python STOCS.py --environment=fractal --manipuland=sphere
 
-Results will be placed in the `tmp` directory.
+Results will be placed in the `results` directory.  Debugging information of the SNOPT algorithm will be written to `tmp/debug.txt`.
 
 ## Visualize planned trajectory
 > python STOCS.py --result_path=results/plane_koala_STOCS/result.npy --environment=plane --manipuland=koala
