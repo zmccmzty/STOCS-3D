@@ -1083,7 +1083,7 @@ if __name__ == '__main__':
     # Save the result as JSON
     import dataclasses
     import json
-    folder = f'output/{environment}_{manipuland}/'
+    folder = f'results/{environment}_{manipuland}/'
     if not os.path.exists(folder):
         os.makedirs(folder)
     print("Saving results to", folder)

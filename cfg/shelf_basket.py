@@ -52,7 +52,6 @@ manipulation_contact_normals = [
 ]
 
 
-
 #problem
 problem = Problem(manipuland = manipuland,
                     manipuland_mass = mass,
