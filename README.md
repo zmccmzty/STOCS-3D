@@ -30,10 +30,7 @@ To install in a virtual environment, you may use the following:
 
 ## Running demos
 
-First, you must download the pre-computed SDFs for the environments used in the demos from the following link, and place them in the folder `data/environments`.
-[https://drive.google.com/file/d/1bMg7aNiUAnojUgs8koyhwdJXODThaNSN/view?usp=drive_link]
-
-Then you can run STOCS on the example environments and objects as follows:
+You can run STOCS on the example environments and objects as follows:
 
 > python STOCS.py --environment=plane --manipuland=koala
 
