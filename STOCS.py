@@ -9,7 +9,7 @@ from klampt.model.trajectory import SE3Trajectory
 from semiinfinite.geometryopt import PenetrationDepthGeometry
 import threading
 from utils import *
-from optimization import Variable,ObjectiveFunction,ConstraintFunction,NonlinearProgramSolver
+from optimization import Variable,ObjectiveFunction,ConstraintFunction,NonlinearProgramSolver,to_1d_array
 from typing import List,Tuple,Dict,Optional,Union,Callable,Any
 FloatOrVector = Union[float,np.array]
 from klampt.model.typing import RigidTransform,Vector3
@@ -132,7 +132,8 @@ class OptimizerParams:
     max_ls_iter : int = 20                  # maximum number of line search iterations
     ls_shrink_factor : float = 0.8          # line search shrink factor
     complementary_convergence_tolerance: float = 1e-4
-    balance_convergence_tolerance: float = 1e-4
+    equality_convergence_tolerance: float = 1e-4
+    inequality_convergence_tolerance: float = 1e-4 
     penetration_convergence_tolerance: float = 1e-4
     step_convergence_tolerance: float = 1e-4
     boundary_convergence_tolerance: float = 1e-4
@@ -196,6 +197,29 @@ class Result:
         index_set_nums = [[len(state.index_set) for state in iterate.states] for iterate in self.iterates]
         return np.mean(np.array(index_set_nums))
 
+def collate(vdict:dict,time_index=1):
+    """Gathers a dictionary of values whose keys are of the form
+    (key,time) into a dictionary of the form key -> [value1,value2,...].
+    """
+    res = {}
+    for k,v in vdict.items():
+        if isinstance(k,tuple) and time_index < len(k):
+            assert isinstance(k[time_index],int)
+            top_key = k[:time_index] + k[time_index+1:]
+            t = k[time_index]
+            res[top_key] = res.get(top_key,[])
+            while len(res[top_key]) < t+1:
+                res[top_key].append(None)
+            res[top_key][t] = v
+        else:
+            res[k] = v
+    for k,v in res.items():
+        if isinstance(v,list):
+            try:
+                res[k] = np.array(v)
+            except Exception:
+                pass
+    return res
 
 class STOCS(NonlinearProgramSolver):
     """Uses the Simultaneous Trajectory Optimization and Contact Selection
@@ -246,10 +270,10 @@ class STOCS(NonlinearProgramSolver):
             self.variables[('v',i)] = vs[i]
             self.variables[('f_mnp',i)] = f_mnp[i]
             #self.variables[('f_env',i)] = f_env[i]
-        self.objective = ObjectiveFunction(lambda *args:0.0*args[0], qs+xs, description='zero objective')
+        self.objective = ObjectiveFunction(lambda *args:0.0*args[0][0], qs+xs, description='zero objective')
         for i in range(self.N):
             self.constraints[('unit_quaternion',i)] = ConstraintFunction(lambda q:q@q, qs[i],lb=1,ub=1,description=f'unit quaternion[{i}]')
-            self.constraints[('angular_velocity_bound',i)] = ConstraintFunction(lambda w:w@w, ws[i],lb=0,ub=self.problem.w_max,description=f'angular velocity bound[{i}]')
+            self.constraints[('angular_velocity_bound',i)] = ConstraintFunction(lambda w:w@w, ws[i],lb=0,ub=self.problem.w_max**2,description=f'angular velocity bound[{i}]')
             self.constraints[('force_balance',i)] = ConstraintFunction(self._force_balance_constraint,[qs[i],xs[i],vs[i],f_mnp[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'force balance[{i}]')
             self.constraints[('torque_balance',i)] = ConstraintFunction(self._torque_balance_constraint,[qs[i],xs[i],ws[i],f_mnp[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'torque balance[{i}]')
             # self.constraints[('force_balance',i)] = ConstraintFunction(self._force_balance_constraint,[qs[i],xs[i],vs[i],f_mnp[i],f_env[i]],pre_args=(i,),lb=np.zeros(3),ub=np.zeros(3),description=f'force balance[{i}]')
@@ -258,7 +282,7 @@ class STOCS(NonlinearProgramSolver):
                 self.constraints[('backward_euler_q',i)] = ConstraintFunction(self._backward_euler_q,[qs[i],qs[i-1],ws[i]],rhs=np.zeros(4),description=f'backward euler quaternion[{i}]')
                 self.constraints[('backward_euler_x',i)] = ConstraintFunction(self._backward_euler_x,[xs[i],xs[i-1],vs[i]],rhs=np.zeros(3),description=f'backward euler position[{i}]')
             for j in range(len(self.problem.manipulation_contact_points)):
-                self.constraints[('fmnp_friction_cone',i)] = ConstraintFunction(self._friction_cone_constraint,f_mnp[i][j],pre_args=(self.problem.mu_mnp,),lb=0.0,description=f'f_mnp friction cone[{i},{j}]')
+                self.constraints[('fmnp_friction_cone',i,j)] = ConstraintFunction(self._friction_cone_constraint,f_mnp[i][j],pre_args=(self.problem.mu_mnp,),lb=0.0,description=f'f_mnp friction cone[{i},{j}]')
 
     def set_callback(self, cb : Callable):
         """Sets a callback that will be called every iteration with the current
@@ -374,7 +398,7 @@ class STOCS(NonlinearProgramSolver):
         """
         if initial is None:
             times = np.arange(0,self.problem.N*self.problem.time_step,self.problem.time_step).tolist()
-            fmnp = [np.array([1e-3] + [1e-3]*self.optimization_params.friction_dim) for i in range(len(self.problem.manipulation_contact_points))]
+            fmnp = [np.array([1e-3] + [1e-4]*self.optimization_params.friction_dim) for i in range(len(self.problem.manipulation_contact_points))]
             initial_states = []
             for i in range(self.N):
                 T = None
@@ -386,13 +410,14 @@ class STOCS(NonlinearProgramSolver):
                     v = np.zeros(3)
                 elif self.optimization_params.initialization == "linear":
                     T = se3.interpolate(self.problem.T_init,self.problem.T_goal,i/(self.N-1))
-                    wv = vectorops.mul(se3.error(self.problem.T_goal,self.problem.T_init),1.0/self.problem.time_step)
+                    wv = vectorops.mul(se3.error(self.problem.T_goal,self.problem.T_init),1.0/((self.N-1)*self.problem.time_step))
                     w = np.array(wv[0:3])
                     v = np.array(wv[3:6])
                 else:
                     raise ValueError(f"Invalid initialization type {self.optimization_params.initialization}")
                 
                 initial_states.append(TimestepState(x=np.array(T[1]),q=np.array(so3.quaternion(T[0])),v=v,w=w,index_set=[],fenv=[],fmnp=copy.deepcopy(fmnp),d=[],gamma=[],dummy=[],alpha=[]))
+            
             self.set_state(TrajectoryState(initial_states, times))
         elif isinstance(initial,TrajectoryState):
             self.set_state(initial)
@@ -431,9 +456,15 @@ class STOCS(NonlinearProgramSolver):
                               fenv=[self.variables[('f_env',i,j)].get() for j in range(k)],
                               fmnp=[self.variables[('f_mnp',i)].get()[j] for j in range(m)],
                               d=[self.variables[('d',i,j)].get() for j in range(k)],
-                              gamma=[self.variables[('gamma',i,j)].get() for j in range(k)],
-                                dummy=[self.variables[('dummy',i,j)].get() for j in range(k)],
-                                alpha=[self.variables[('alpha',i,j)].get() for j in range(k)])
+                              gamma=[],
+                              dummy=[],
+                              alpha=[])
+        
+            if self.optimization_params.velocity_complementarity:
+                s.gamma=[self.variables[('gamma',i,j)].get() for j in range(k)]
+                s.dummy=[self.variables[('dummy',i,j)].get() for j in range(k)]
+            if self.optimization_params.use_alpha:
+                s.alpha=[self.variables[('alpha',i,j)].get() for j in range(k)]
             states.append(s)
         times = np.arange(0,self.problem.N*self.problem.time_step,self.problem.time_step).tolist()
         return TrajectoryState(states, times)
@@ -445,7 +476,8 @@ class STOCS(NonlinearProgramSolver):
         if self.current_iterate is None:
             #initialize, if necessary
             self.set_initial_state()
-
+            #self.pprint_infeasibility()
+            
         stocs_res = Result(is_success=False,total_iter=0,iterates=[],final=copy.deepcopy(self.current_iterate))
         print("Initial score function",self._score_function(self.current_iterate))
         if self.callback is not None:
@@ -460,7 +492,7 @@ class STOCS(NonlinearProgramSolver):
                 #remove index points and variables -- go backwards to avoid index shifting
                 for j in removed_index_set[i][::-1]:
                     assert j < len(iset)
-                    self._remove_index_point(i,j)
+                    #self._remove_index_point(i,j)
                 
                 #add new variables
                 self._add_index_points(i,new_index_set[i])
@@ -468,7 +500,7 @@ class STOCS(NonlinearProgramSolver):
 
             #update trace
             self.current_iterate = self.get_var_dict()
-            stocs_res.iterates.append(copy.deepcopy(self.current_iterate))
+            stocs_res.iterates.append(self.get_state())
             stocs_res.final = stocs_res.iterates[-1]
             stocs_res.total_iter = iter
             print(f"Index points for each time step along the trajectory: {[len(s) for s in self.current_index_sets]}")
@@ -479,9 +511,9 @@ class STOCS(NonlinearProgramSolver):
             #set all the complementarity thresholds
             for i in range(self.N):
                 for j in range(len(self.current_index_sets[i])):
+                    k = self.optimization_params.friction_dim
                     if ('velocity_complementarity',i,j) in self.constraints:
-                        #TODO: this is not the right indexing into the upper bound
-                        self.constraints[('velocity_complementarity',i,j)].ub = self.comp_threshold
+                        self.constraints[('velocity_complementarity',i,j)].ub[:k] = self.comp_threshold
                     if ('dummy_gamma_complementarity',i,j) in self.constraints:
                         self.constraints[('dummy_gamma_complementarity',i,j)].ub = self.comp_threshold
                     self.constraints[('force_distance_complementarity',i,j)].ub = self.comp_threshold
@@ -498,6 +530,7 @@ class STOCS(NonlinearProgramSolver):
 
             dot_thread = threading.Thread(target=print_dots, args=(stop_event,), daemon=True)
             dot_thread.start()
+            super().setup_drake_program()
             try:
                 #run the NLP solver
                 res_target = super().solve(self.optimization_params.max_mpcc_iter,self.optimization_params.major_feasibility_tolerance,self.optimization_params.major_optimality_tolerance,"tmp/debug.txt")
@@ -527,10 +560,32 @@ class STOCS(NonlinearProgramSolver):
                     diffs.append((prev_iterate[k] - v).flatten())
             var_diff = np.concatenate(diffs)
             
-            n_index_points = sum(len(index_set) for index_set in self.current_index_sets)
-            if self._complimentarity_residual(res) < self.optimization_params.complementary_convergence_tolerance*(1+1+self.optimization_params.friction_dim)*n_index_points and \
-                self._deepest_penetration(res) < self.optimization_params.penetration_convergence_tolerance*self.N and \
-                self._balance_residual(res) < self.optimization_params.balance_convergence_tolerance*self.N and \
+            bound_residuals = {}
+            complementarity_residuals = {}
+            equality_residuals = {}
+            inequality_residuals = {}
+            for k,v in self.variables.items():
+                bound_residuals[k] = v.bound_residual()
+            for k,c in self.constraints.items():
+                if c.equality():
+                    equality_residuals[k] = c.residual()
+                elif k[0].endswith('complementarity'):
+                    complementarity_residuals[k] = c.residual()
+                else:
+                    inequality_residuals[k] = c.residual()
+            bound_residual = np.concatenate([to_1d_array(r) for r in bound_residuals.values()])
+            complementarity_residual = np.concatenate([np.abs(to_1d_array(r)) for r in complementarity_residuals.values()])
+            equality_residual = np.concatenate([np.abs(to_1d_array(r)) for r in equality_residuals.values()])
+            inequality_residual = np.concatenate([to_1d_array(r) for r in inequality_residuals.values()])
+            print("Bound residual",np.max(bound_residual))
+            print("Complementarity residual",np.max(complementarity_residual))
+            print("Equality residual",np.max(equality_residual))
+            print("State delta",np.max(var_diff))
+            if np.all(bound_residual < self.optimization_params.boundary_convergence_tolerance) and \
+                np.all(complementarity_residual < self.optimization_params.complementary_convergence_tolerance) and \
+                np.all(self._deepest_penetration(res) < self.optimization_params.penetration_convergence_tolerance) and \
+                np.all(equality_residual < self.optimization_params.equality_convergence_tolerance) and \
+                np.all(inequality_residual < self.optimization_params.inequality_convergence_tolerance) and \
                 np.linalg.norm(var_diff) < self.optimization_params.step_convergence_tolerance*len(var_diff):
                 
                 print("Successfully found result.")
@@ -541,7 +596,7 @@ class STOCS(NonlinearProgramSolver):
             iter += 1
             self.comp_threshold *= self.optimization_params.comp_threshold_shrink_factor
 
-        stocs_res.iterates.append(copy.deepcopy(self.current_iterate))
+        stocs_res.iterates.append(self.get_state())
         stocs_res.final = stocs_res.iterates[-1]
         stocs_res.total_iter = iter
         stocs_res.time = time.time()-t_start
@@ -549,7 +604,48 @@ class STOCS(NonlinearProgramSolver):
             self.callback(self.current_iterate)
         return stocs_res
     
-    def interpolate(self, iterate1 : dict, iterate2 : dict, u : float, strict=True) -> dict:
+    def pprint_infeasibility(self):
+        bound_residuals = {}
+        complementarity_residuals = {}
+        equality_residuals = {}
+        inequality_residuals = {}
+        for k,v in self.variables.items():
+            bound_residuals[k] = v.bound_residual()
+        for k,c in self.constraints.items():
+            if c.equality():
+                equality_residuals[k] = c.residual()
+            elif k[0].endswith('complementarity'):
+                complementarity_residuals[k] = c.residual()
+            else:
+                inequality_residuals[k] = c.residual()
+        bound_residuals = collate(bound_residuals)
+        complementarity_residuals = collate(complementarity_residuals)
+        equality_residuals = collate(equality_residuals)
+        inequality_residuals = collate(inequality_residuals)
+        bound_residuals = dict((k,v) for k,v in bound_residuals.items() if not all(x is None or np.all(x==0) for x in v))
+        complementarity_residuals = dict((k,v) for k,v in complementarity_residuals.items() if not all(x is None or np.all(x==0) for x in v))
+        equality_residuals = dict((k,v) for k,v in equality_residuals.items() if not all(x is None or np.all(np.abs(x) <= self.optimization_params.equality_convergence_tolerance) for x in v))
+        inequality_residuals = dict((k,v) for k,v in inequality_residuals.items() if not all(x is None or np.all(x==0) for x in v))
+
+        if len(bound_residuals) > 0:
+            print("Bound residuals:")
+            for k,v in bound_residuals.items():
+                print(k,v)
+        if len(complementarity_residuals) > 0:
+            print("Complementarity residuals")
+            for k,v in complementarity_residuals.items():
+                print(k,v)
+        if len(equality_residuals) > 0:
+            print("Equality residuals")
+            for k,v in equality_residuals.items():
+                print(k,v)
+        if len(inequality_residuals) > 0:
+            print("Inequality residuals")
+            for k,v in inequality_residuals.items():
+                print(k,v)
+
+    
+    def _interpolate(self, iterate1 : dict, iterate2 : dict, u : float, strict=True) -> dict:
         """Interpolates between two states.  If strict is True, then the states'
         lengths must match.  If strict is False, then the states will be
         interpolated even if they have different lengths.
@@ -586,8 +682,14 @@ class STOCS(NonlinearProgramSolver):
         
         fb = self.constraints[('force_balance',i)]
         tb = self.constraints[('torque_balance',i)]
-        fb.variables[j] = fb.variables.pop()
-        tb.variables[j] = tb.variables.pop()
+        fb.variables[4+j] = fb.variables.pop()
+        tb.variables[4+j] = tb.variables.pop()
+        self.current_index_sets[i][j]= self.current_index_sets[i].pop()
+        fcount = 0
+        for j in range(jlast+1):
+            if ('f_env',i,j) in self.variables:
+                fcount += 1
+        assert fcount == len(self.current_index_sets[i])
         self.self_check()
 
     def _add_index_points(self,i : int, new_points : List[np.ndarray]):
@@ -598,35 +700,39 @@ class STOCS(NonlinearProgramSolver):
         vi = self.variables[('v',i)]
         wi = self.variables[('w',i)]
         #initialize force to a small force
-        finit = np.array([1e-3] + [1e-3]*k)
+        finit = np.array([1e-3] + [1e-4]*k)
+        dummy0 = self._friction_cone_constraint(self.problem.mu_env,finit)
         for j in range(m,m+len(new_points)):
             point = new_points[j-m]
             fij = Variable(name=('f_env',i,j),value=finit, lb=np.zeros(1+k),ub=np.array([self.problem.fenv_max]+[self.problem.fenv_max*self.problem.mu_env]*k))
-            dij = Variable(name=('d',i,j),value=0.0,lb=0.0,description=f'environment distance to index point {i}, {j}')
+            d0 = self._point_distance(point,qi.get(),xi.get())
+            dij = Variable(name=('d',i,j),value=d0,lb=0.0,description=f'environment distance to index point {i}, {j}')
 
             self.variables[('f_env',i,j)] = fij
             self.variables[('d',i,j)] = dij
             self.constraints[('force_balance',i)].variables.append(fij)
             self.constraints[('torque_balance',i)].variables.append(fij)
-            self.constraints[('d_distance_equality',i,j)] = ConstraintFunction(self._point_distance_constraint,[qi,xi,dij],pre_args=(point,),rhs=0.0)
-            self.constraints[('force_distance_complementarity',i,j)] = ConstraintFunction(lambda f,d:f*d,[fij,dij],ub=self.comp_threshold)
-            self.constraints[('fenv_friction_cone',i,j)] = ConstraintFunction(self._friction_cone_constraint,fij,pre_args=(self.problem.mu_env,),lb=0.0,description=f'fenv friction cone[{i},{j}]')
-
+            self.constraints[('d_distance_equality',i,j)] = ConstraintFunction(lambda point,q,x,d:self._point_distance(point,q,x)-d,[qi,xi,dij],pre_args=(point,),rhs=0.0)
+            def f_d(f,d):
+                #print(f,d)
+                return f*d
+            self.constraints[('force_distance_complementarity',i,j)] = ConstraintFunction(f_d,[fij[0],dij],ub=self.comp_threshold)
 
             if self.optimization_params.velocity_complementarity:
-                gij = Variable(name=('gamma',i,j),value=0.0,lb=0.0,description=f'tangential velocity bound for index point {i}, {j}')
-                dummyij = Variable(name=('dummy',i,j),value=0.0,lb=0.0,description=f'dummy variable for velocity complementarity for index point {i}, {j}')
+                g0 = np.linalg.norm(self.variables[('v',i)].get())
+                gij = Variable(name=('gamma',i,j),value=g0,lb=0.0,description=f'tangential velocity bound for index point {i}, {j}')
+                dummyij = Variable(name=('dummy',i,j),value=dummy0,lb=0.0,description=f'dummy variable for velocity complementarity for index point {i}, {j}')
                 self.variables[('gamma',i,j)] = gij
                 self.variables[('dummy',i,j)] = dummyij
                 def dummy_friction_residual(f,d):
                     return self._friction_cone_constraint(self.problem.mu_env,f)-d
-                self.constraints[('dummy_friction_residual_constraint',i,j)] = ConstraintFunction(dummy_friction_residual,[fij,dij],rhs=0.0,description=f'Dummy = friction residual [{i},{j}]')
-                lb = [-np.inf]*k+[0.]*k
-                ub = [self.comp_threshold]*k+[np.inf]*k
+                self.constraints[('dummy_friction_residual_constraint',i,j)] = ConstraintFunction(dummy_friction_residual,[fij,dummyij],rhs=0.0,description=f'Dummy = friction residual [{i},{j}]')
+                lb = np.array([-np.inf]*k+[0.]*k)
+                ub = np.array([self.comp_threshold]*k+[np.inf]*k)
                 self.constraints[('velocity_complementarity',i,j)] = ConstraintFunction(self._velocity_cc_constraint,[qi,wi,xi,vi,gij,fij],pre_args=(point,),lb=lb,ub=ub,description=f"Velocity CC constraint time {i}, index point {j}.") 
-                self.constraints[('dummy_gamma_complementarity',i,j)] = ConstraintFunction(lambda d,g: d*g, [dij,gij],ub=self.comp_threshold)
+                self.constraints[('dummy_gamma_complementarity',i,j)] = ConstraintFunction(lambda d,g: d*g, [dummyij,gij],ub=self.comp_threshold)
             else:
-                self.constraints[('fenv_friction_cone',i)] = ConstraintFunction(self._friction_cone_constraint,fij,lb=0.0,description=f'fenv friction[{i},{j}]')
+                self.constraints[('fenv_friction_cone',i,j)] = ConstraintFunction(self._friction_cone_constraint,fij,lb=0.0,description=f'fenv friction[{i},{j}]')
 
                 # # Force on and off
                 # if self.optimization_params.force_on_off:
@@ -658,7 +764,7 @@ class STOCS(NonlinearProgramSolver):
         while target_score > current_score and iter_ls < self.optimization_params.max_ls_iter:
             step_size = step_size*self.optimization_params.ls_shrink_factor
 
-            res_temp = self.interpolate(res_current,res_target,step_size) 
+            res_temp = self._interpolate(res_current,res_target,step_size) 
             
             target_score = self._score_function(res_temp)
 
@@ -672,51 +778,33 @@ class STOCS(NonlinearProgramSolver):
         score = self.objective()
         #variable bounds
         for v in self.variables.values():
-            if v.lb is not None:
-                score += np.sum(np.maximum(v.lower_bound()-v.value,0))
-            if v.ub is not None:
-                score += np.sum(np.maximum(v.value-v.upper_bound(),0))
+            score += np.sum(v.bound_residual())
         #constraint residuals
-        for c in self.constraints.values():
+        for k,c in self.constraints.items():
             score += np.sum(np.abs(c.residual()))
         return score
 
-    def _index_point_penetration(self,res : TrajectoryState) -> list:
+    def _deepest_penetration(self,res: dict) -> list:
         penetration = []
         for i in range(self.N):
-            T = res.states[i].pose()
-            peni = []
-            for point in res.states[i].index_set:
-                point_world = se3.apply(T,point)   
-                for environment in self.problem.environments:
-                    dist = environment.distance(point_world)[0]
-                    peni.append(-dist)
-            penetration.append(peni)
-        return penetration
-
-    def _deepest_penetration(self,res: TrajectoryState) -> list:
-        penetration = []
-        for i in range(self.N):
-            T = res.states[i].pose()
+            T = so3.from_quaternion(res[('q',i)]),res[('x',i)].tolist()
             self.manipuland.setTransform(T)
             mindist = np.inf
             for environment in self.problem.environments:
                 dist_, p_obj, p_env = self.manipuland.distance(environment)
                 mindist = min(mindist,dist_)
             penetration.append(-mindist)
-        return penetration
+        return np.array(penetration)
     
     def _environment_distance_gradient(self,pt_world : Vector3) -> Vector3:
         assert self.problem.environment_sdf_cache is not None, "Environment SDF cache is not initialized."
         return self.problem.environment_sdf_cache.gradient(pt_world)
 
-    def _point_distance_constraint(self,point_ : Vector3, q, x, d) -> float:
+    def _point_distance(self, point_: Vector3, q, x) -> float:
         assert self.problem.environment_sdf_cache is not None, "Environment SDF cache is not initialized."
         point, env_idx = point_[:3], point_[3]
-        point_world = se3.apply((so3.from_quaternion(q),x),point)     
-        dist = self.problem.environment_sdf_cache.distance(point_world)
-        res = dist - d
-        return res
+        point_world = se3.apply((so3.from_quaternion(q),x),point)
+        return self.problem.environment_sdf_cache.distance(point_world)
     
     def force_3d(self, f_vec : np.ndarray, normal : Vector3) -> Vector3:
         """Given a force encoded as normal force + tangential forces, returns
@@ -737,7 +825,7 @@ class STOCS(NonlinearProgramSolver):
         for fe in f_env:
             assert len(fe) == k+1
         if len(self.problem.manipulation_contact_points) > 0:
-            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(k+1)), f"Manipulator force dimension is not correct, timestep {t}: {f_mnp.shape} vs {(len(self.problem.manipulation_contact_points),(self.friction_dim+1))}"
+            assert f_mnp.shape == (len(self.problem.manipulation_contact_points),(k+1)), f"Manipulator force dimension is not correct, timestep {t}: {f_mnp.shape} vs {(len(self.problem.manipulation_contact_points),(k+1))}"
         R = so3.from_quaternion(q)
 
         force = 0
@@ -825,11 +913,15 @@ class STOCS(NonlinearProgramSolver):
         return skew_matrix
 
     def _apply_angular_velocity_to_quaternion(self, q, w, dt : float):
-        w_mag = np.linalg.norm(w)*dt
+        w_mag = w@w
+        if w_mag < 1e-15:
+            return q
+        w_mag = np.sqrt(w_mag)*dt
         #w_axis = w/w_mag
         #delta_q = np.hstack([np.cos(w_mag/2.0), w_axis*np.sin(w_mag/2.0)])
-        #sinc (w_mag/2) = sin(pi w_mag/2) / (pi w_mag/2)
-        delta_q = np.hstack([np.cos(w_mag*0.5), (np.pi*0.5)*w*np.sinc(w_mag*0.5)])
+        #sinc (w_mag/2/pi) = sin(pi w_mag/2/pi) / (pi w_mag/2/pi) = 2 sin(w_mag/2)/w_mag
+        #w_axis*np.sin(w_mag/2.0) = w/w_mag*np.sin(w_mag/2.0)
+        delta_q = np.hstack([np.cos(w_mag*0.5), (0.5)*w*dt*np.sinc(w_mag*0.5/np.pi)])
         return  self.quat_multiply(q, delta_q)
 
     def _backward_euler_q(self, q, qprev, w):
@@ -906,7 +998,7 @@ class STOCS(NonlinearProgramSolver):
 
     def _friction_cone_constraint(self,mu,f_vector):
         fn,ff = np.split(f_vector, [1])
-        res = mu*fn 
+        res = mu*fn[0]
         for ffi in ff:
             res -= ffi
         return res
@@ -977,7 +1069,12 @@ if __name__ == '__main__':
         vis.show()
         plot_problem_klampt(problem,False)
 
-    res = stocs_3d.solve()
+    import warnings
+    warnings.filterwarnings("error")
+    try:
+       res = stocs_3d.solve()
+    except Warning as e:
+        raise()
     print(f"Time used: {res.time}s.")
     print(f"Success: {res.is_success}")
     print(f"Outer iterations: {res.total_iter}")
@@ -998,6 +1095,7 @@ if __name__ == '__main__':
         replaced_problem = replace(problem,manipuland=None,environments=[],environment_sdf_cache=None)
         json.dump(dataclasses.asdict(replaced_problem),f,cls=NumpyEncoder)
     
-    while vis.shown():
-        time.sleep(0.1)
-    vis.kill()
+    if args.debug:
+        while vis.shown():
+            time.sleep(0.1)
+        vis.kill()

@@ -61,7 +61,7 @@ class Variable:
 
     def set(self,value : FloatOrVector):
         if self.shape is not None:
-            assert np.shape(value) == self.shape
+            assert np.shape(value) == self.shape,f"Variable {self.name_and_description()}: set value doesn't match match shape"
         self.value = value
     
     def get(self) -> FloatOrVector:
@@ -86,6 +86,20 @@ class Variable:
 
     def __getitem__(self,index):
         return _IndexedVariable(self,index)
+    
+    def bound_residual(self):
+        """Returns the residual of the constraint.  If the constraint is an
+        equality constraint, returns the difference between the function
+        output and the rhs.  If the constraint is an inequality constraint,
+        returns the violation of the function output vs the bounds."""
+        err = 0.0
+        if self.ub is not None:
+            err = np.maximum(self.value-self.ub,err)
+        if self.lb is not None:
+            err = np.maximum(-self.value+self.lb,err)
+        if np.shape(err) == ():
+            return np.array([err])
+        return err.flatten()
 
 
 class _IndexedVariable:
@@ -122,6 +136,15 @@ class _IndexedVariable:
     def upper_bound(self):
         return self.parent.upper_bound()[self.index]
 
+    def bound_residual(self):
+        """Returns the residual of the constraint.  If the constraint is an
+        equality constraint, returns the difference between the function
+        output and the rhs.  If the constraint is an inequality constraint,
+        returns the violation of the function output vs the bounds."""
+        err = np.maximum(self.get()-self.upper_bound(),0)
+        err = np.maximum(-self.get()+self.lower_bound(),err)
+        return err
+    
 
 class Function:
     """Represents a function that takes a set of variables as input.
@@ -228,12 +251,12 @@ class ConstraintFunction(Function):
     def lower_bound(self):
         if self.lb is not None:
             return self.lb
-        return np.full(-np.inf,self.shape())
+        return np.full(self.shape(),-np.inf)
     
     def upper_bound(self):
         if self.ub is not None:
             return self.ub
-        return np.full(np.inf,self.shape())
+        return np.full(self.shape(),np.inf)
 
     def equality(self) -> bool:
         return self._equality
@@ -246,13 +269,17 @@ class ConstraintFunction(Function):
         res = self.__call__()
         if self.equality():
             return res - self.lb
-        err = None
+        err = 0.0
         if self.ub is not None:
-            err = np.maximum(res-self.ub,0)
+            err = np.maximum(res-self.ub,err)
         if self.lb is not None:
-            err = np.maximum(-res+self.lb,0)
+            err = np.maximum(-res+self.lb,err)
         return err
 
+def to_1d_array(x):
+    if isinstance(x,(int,float)):
+        return np.array([x])
+    return np.asarray(x).flatten()
 
 class NonlinearProgramSolver(object):
     """Binds a set of variables, constraints, and an objective function to a
@@ -302,32 +329,37 @@ class NonlinearProgramSolver(object):
             for v in c.variables:
                 while isinstance(v,_IndexedVariable):
                     v=v.parent
-                assert v in self.variables.values(),f"Constraint {k} has variable {v} not in variables dict"
+                assert v in self.variables.values(),f"Constraint {k} has variable {v.name_and_description()} not in variables dict"
 
     def setup_drake_program(self):
         prog = pd.MathematicalProgram()
         self.prog = prog
         for k,v in self.variables.items():
             if len(v.shape)==0:
-                v.solver_impl = prog.NewContinuousVariable(name=v.name)
+                v.solver_impl = prog.NewContinuousVariables(1,name=v.name_str())
             elif len(v.shape)==1:
-                v.solver_impl = prog.NewContinuousVariables(v.shape[0],name=v.name)
+                v.solver_impl = prog.NewContinuousVariables(v.shape[0],name=v.name_str())
             elif len(v.shape)==2:
-                v.solver_impl = prog.NewContinuousVariables(rows=v.shape[0],cols=v.shape[1],name=v.name)
+                v.solver_impl = prog.NewContinuousVariables(rows=v.shape[0],cols=v.shape[1],name=v.name_str())
             if v.lb is not None or v.ub is not None:
                 prog.AddBoundingBoxConstraint(v.lower_bound(),v.upper_bound(),v.solver_impl) 
             if v.value is not None:
-                prog.SetInitialGuess(v.solver_impl, v.value)
+                if len(v.shape)==0: #scalar
+                    prog.SetInitialGuess(v.solver_impl, [v.value])
+                else:
+                    prog.SetInitialGuess(v.solver_impl, v.value)
 
         for k,func in self.constraints.items():
             flat_func,flat_vars = self._wrap(func)
-            c = self.prog.AddConstraint(flat_func,func.lower_bound(),func.upper_bound(),flat_vars)
+            desc = func.description if func.description else '_'.join(str(s) for s in k)
+            c = self.prog.AddConstraint(flat_func,lb=to_1d_array(func.lower_bound()),ub=to_1d_array(func.upper_bound()),vars=flat_vars,description=desc)
             if func.description:
                 c.evaluator().set_description(func.description)
 
         # Objective function
-        flat_func,flat_vars = self.wrap(self.objective)
-        c = self.prog.AddCost(flat_func,flat_vars)
+        flat_func,flat_vars = self._wrap(self.objective,as_vector=False)
+        desc = func.description if func.description else 'objective'
+        c = self.prog.AddCost(flat_func,flat_vars,description=desc)
         if self.objective.description:
             c.evaluator().set_description(self.objective.description)
 
@@ -355,7 +387,10 @@ class NonlinearProgramSolver(object):
         #parse solution
         res_dict = {}
         for k,v in self.variables.items():
-            res_dict[k] = v.value = result.GetSolution(v.solver_impl)
+            if len(v.shape)==0:  #scalar
+                res_dict[k] = v.value = result.GetSolution(v.solver_impl)[0]
+            else:
+                res_dict[k] = v.value = result.GetSolution(v.solver_impl)
         return res_dict
 
     def evaluate(self) -> Dict[Any,FloatOrVector]:
@@ -391,13 +426,19 @@ class NonlinearProgramSolver(object):
         for k,v in values.items():
             self.variables[k].set(v)
 
-    def _wrap(self,func:Function) -> Tuple[Callable,np.ndarray]:
+    def _wrap(self,func:Function, as_vector=True) -> Tuple[Callable,np.ndarray]:
         """Automatically encodes and decodes heterogeneous variables to a
         function into a Drake function and list of variables."""
         all_scalar = True
         concat_list = []
         size_list = []
-        vars = [v.solver_impl for v in func.variables]
+        def to_pd(v):
+            if isinstance(v,Variable):
+                return v.solver_impl
+            elif isinstance(v,_IndexedVariable):
+                return to_pd(v.parent)[v.index]
+            raise TypeError(f"Cannot convert {v} to a Drake variable")
+        vars = [to_pd(v) for v in func.variables]
         for v in vars:
             if isinstance(v,pd.Variable):
                 concat_list.append([v])
@@ -425,12 +466,12 @@ class NonlinearProgramSolver(object):
             def flattened_func(x):
                 x_split = np.split(x,split_list)
                 for i in range(len(x_split)):
-                    if isinstance(vars[i].solver_impl,pd.Variable):
+                    if isinstance(vars[i],pd.Variable):  # extract scalar
                         x_split[i] = x_split[i][0]
-                    elif len(vars[i].shape)==2:
+                    elif len(vars[i].shape)==2:  # resize to matrix
                         x_split[i] = x_split[i].reshape(vars[i].shape)
                 res = func(*x_split)
-                if not hasattr(res,'__iter__'):
+                if as_vector and not hasattr(res,'__iter__'):
                     return [res]
                 return res
             return flattened_func,np.concatenate(concat_list)
