@@ -1,4 +1,5 @@
 results
+tmp
 __pycache__/
 cfg/__pycache__/
 data/__pycache__/
