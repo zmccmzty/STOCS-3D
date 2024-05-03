@@ -574,8 +574,5 @@ if __name__ == '__main__':
     res['param']['manipuland_params']['manipuland_g3d'] = None
     res['param']['manipuland_params']['manipuland_o3d'] = None
     res['param']['environment_params']['environments'] = None
-    res['param']['environment_params']['query_object_ad'] = None
-    res['param']['environment_params']['query_object_f'] = None
-    res['param']['environment_params']['query_object_ad_ids'] = None
-    res['param']['environment_params']['query_object_f_ids'] = None
+    res['param']['environment_params']['environment_sdf_cache']=None
     np.save(f'results/{environment}_{manipuland}_STOCS/result.npy', res)
