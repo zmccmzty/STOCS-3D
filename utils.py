@@ -116,6 +116,14 @@ def trilinear_interpolation(bounds, values, pt, is_distance=True):
     """
     bmin = bounds[0:3]
     bmax = bounds[3:6]
+    #shift the bounding box to vertex centers
+    bmin = np.array(bmin)
+    bmax = np.array(bmax)
+    dims = np.array([v for v in values.shape])
+    bmin_ = bmin + 0.5*(bmax - bmin) / (dims)
+    bmax_ = bmax - 0.5*(bmax - bmin) / (dims)
+    bmin, bmax = bmin_, bmax_
+    #find cell coordinates
     x_bb = (pt[0] - bmin[0]) / (bmax[0] - bmin[0]) * (values.shape[0] - 1)
     y_bb = (pt[1] - bmin[1]) / (bmax[1] - bmin[1]) * (values.shape[1] - 1)
     z_bb = (pt[2] - bmin[2]) / (bmax[2] - bmin[2]) * (values.shape[2] - 1)
